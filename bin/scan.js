@@ -114,6 +114,12 @@ exports.execute = function(inputDir, outputDir, dryrun, callback) {
         if (!record.done) {
           processNextFile(iterator);
         }
+      })
+      .catch((reason) => {
+        console.error(reason);
+        if (!record.done) {
+          processNextFile(iterator);
+        }
       });
     } else {
       db.cleanup()

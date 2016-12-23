@@ -7,7 +7,7 @@ var algo = 'sha1';
 module.exports.calculateHash = function(file) {
   return new Promise(
     function(resolve, reject) {
-      console.log("calculateHash('" + file +"')");
+      console.log("calculateHash('" + file + "')");
       var shasum = crypto.createHash(algo);
       var s = fs.ReadStream(file);
       s.on('error', function(error) { reject(error); });

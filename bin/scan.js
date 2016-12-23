@@ -67,7 +67,7 @@ var maybeStoreDbRecordForHash = function(sofar) {
     if (sofar.saveRequired) {
       db.save(sofar.dbRecord)
       .then((dbRecord) => {
-        resolve(dbRecord);
+        resolve(sofar);
       })
       .catch((reason) => {
         reject(reason);
@@ -103,21 +103,31 @@ var processFile = function(filename) {
 }
 
 exports.execute = function(inputDir, outputDir, dryrun, callback) {
-  var it = fs.findFilesInDir(inputDir, (f) => { return (/^.*\.(jpg|jpeg|cr2|crw|tif|tiff|avi|mpg|mpeg)$/i).test(f)});
   var count = 0;
 
   function processNextFile(iterator) {
     var record = iterator.next();
-    console.log("Found " + ++count + " \t->" + record.value);
-    processFile(record.value)
-    .then((result) => {
-      if (!record.done) {
-        processNextFile(iterator);
-      }
-    });
+    if (record.value) {
+      console.log("Found " + ++count + " \t->" + record.value);
+      processFile(record.value)
+      .then((result) => {
+        if (!record.done) {
+          processNextFile(iterator);
+        }
+      });
+    } else {
+      db.cleanup()
+      .catch((reason) => {
+        console.error(reason);
+      })
+    }
   }
 
-  processNextFile(it);
+  db.init()
+  .then(() => {
+    var it = fs.findFilesInDir(inputDir, (f) => { return (/^.*\.(jpg|jpeg|cr2|crw|tif|tiff|avi|mpg|mpeg)$/i).test(f)});
+    processNextFile(it);
+  })
 };
 // exports.execute = function(inputDir, outputDir, dryrun, callback) {
 //   var sequence = Promise.resolve();

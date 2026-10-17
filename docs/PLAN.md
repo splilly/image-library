@@ -1,0 +1,76 @@
+# Plan
+
+## Goals
+
+A standalone, portable (Windows / macOS / Linux) application to catalog many TB of
+photos and videos spread over drives that are connected only some of the time, some
+of them only readable from one OS. It must:
+
+* track progress accurately and survive crashes, with long-running work resumable;
+* work with only some drives connected, and say which drive holds an image (with preview);
+* find corrupt images and let the user look at them before discarding;
+* find exact duplicates and thumbnails generated from originals by old software,
+  distinguishing thumbnails whose original still exists from orphans that are now
+  the only surviving copy;
+* never require installing a runtime or other software first.
+
+## Stack
+
+| Layer | Choice |
+|---|---|
+| Engine | Python 3.12, packaged with PyInstaller per OS (no runtime install) |
+| Decoding | Pillow, pillow-heif, rawpy (LibRaw), psd-tools, PyAV (bundled ffmpeg) |
+| Metadata | exiv2 (bundled C++ library; no Perl/exiftool dependency) |
+| Hashing | BLAKE3 for identity; 64-bit pHash + dHash (numpy) for similarity |
+| Catalog | SQLite (WAL): `catalog.db` + `previews.db` |
+| API / GUI | FastAPI + WebSocket progress; React + TypeScript (Vite), virtualized grids |
+| Desktop shell | pywebview window, or the default browser |
+| Builds | GitHub Actions matrix: Windows x64, macOS arm64 + x64, Linux x64 |
+
+## Key decisions
+
+* **Volume identity** — a `.imagelib-volume.json` marker (UUID + label) at the drive
+  root. Paths stored relative to it with `/` separators; NFC + casefold `path_key`
+  for cross-OS matching; raw bytes kept for non-UTF-8 names.
+* **Content-addressed analysis** — one `contents` row per unique BLAKE3 hash, so
+  duplicates are decoded once and previews are shared.
+* **Read once** — each file is read sequentially by its drive's reader and the same
+  bytes are hashed, decoded (integrity check), measured, perceptually hashed and
+  previewed.
+* **Resumability** — per-file state in SQLite; results committed every second; a
+  scan record per volume/sub-folder resumes where it stopped. Unplugging a drive
+  pauses only that drive; files are never marked missing unless a walk completed
+  with the marker still present.
+* **Robust decoding** — a decoder crash brings down the pool; in-flight files are
+  re-run one at a time to find the culprit. Hangs are killed after a timeout. Both
+  are recorded as corrupt instead of stopping the scan.
+* **Safety** — no automatic deletions. Decisions become a reviewable action plan,
+  executed by moving files into `_imagelib_quarantine/` on the same drive (instant,
+  reversible). The last verified good copy of any content can never be discarded.
+* **Multi-machine: hub + agents** — one hub holds the main catalog and GUI. Agents
+  scan their locally attached drives and sync results and previews to the hub over
+  the LAN, or via an exported bundle file when offline. Quarantine actions for
+  agent-only drives are relayed to that agent.
+
+## Thumbnail classification (milestone 4)
+
+Signals: small dimensions; cache-style paths (`.thumbnails`, `@eaDir`, `tn_`, `_thumb`,
+Picasa/iPhoto/ACDSee/Lightroom preview folders); missing EXIF; Software tag; a pHash
+match to a larger image with the same aspect ratio. Outcome per thumbnail:
+
+* original found and verified OK (on which drives) → safe to discard;
+* original found but corrupt, or only on an offline drive → user decides;
+* no original found → orphan; kept by default and marked "only surviving copy".
+
+## Milestones
+
+1. **Catalog + scanning engine (done)** — schema, drive registry, discovery,
+   read-once analysis, resume, offline handling, crash isolation, CLI, sample library, tests.
+2. **API + GUI** — dashboard with live per-drive throughput/ETA, drives page, browse
+   and search with previews, drag-an-image-in "where is this?".
+3. **Corrupt review + exact duplicates review** — keyboard-driven grids.
+4. **Near-duplicates + thumbnail detection** — linking, classification, review.
+5. **Action plan** — quarantine, undo, purge, last-copy protection.
+6. **Hub/agent sync** — LAN sync, bundle export/import, relayed actions.
+7. **Packaging** — PyInstaller builds for all OSes via GitHub Actions; optional
+   Organize/export of unique best originals into a date-based library.

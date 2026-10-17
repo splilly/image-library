@@ -303,6 +303,38 @@ export interface Cluster {
   members: ClusterMember[];
 }
 
+/** Fired when a remote device's session is missing or expired: the app shows the sign-in screen. */
+export const LOGIN_REQUIRED = "imagelib-login-required";
+
+export interface AuthStatus {
+  local: boolean;
+  via: string;
+  identity: string;
+  signed_in: boolean;
+  password_set: boolean;
+}
+
+export interface RemoteSettings {
+  tailscale_enabled: boolean;
+  tailscale_hosts: string[];
+  tailscale_users: string[];
+  cloudflare_enabled: boolean;
+  cloudflare_hosts: string[];
+  cloudflare_team: string;
+  cloudflare_aud: string;
+  cloudflare_tunnel_token: string;
+}
+
+export interface RemoteState {
+  settings: RemoteSettings;
+  password_set: boolean;
+  sessions: { id: string; created_at: number; last_seen_at: number; via: string; client: string; user_agent: string }[];
+  tailscale: { installed: boolean; running?: boolean; host?: string; owner?: string; error?: string };
+  tailscale_command: string;
+  cloudflared: { installed: boolean; running: boolean; log: string[] };
+  port: number;
+}
+
 /** Error from the API; ``refused`` lists images a decision would have left without a copy. */
 export class ApiError extends Error {
   refused?: { hash: string; status: string; copies: number; paths: string[] }[];
@@ -384,12 +416,13 @@ async function request<T>(method: string, url: string, body?: unknown): Promise<
   }
   const res = await fetch(url, init);
   if (!res.ok) {
-    let body: { detail?: unknown; refused?: ApiError["refused"] } = {};
+    let body: { detail?: unknown; refused?: ApiError["refused"]; login?: boolean } = {};
     try {
       body = await res.json();
     } catch {
       /* not JSON */
     }
+    if (res.status === 401 && body.login) window.dispatchEvent(new Event(LOGIN_REQUIRED));
     const detail = body.detail ?? res.statusText;
     const err = new ApiError(typeof detail === "string" ? detail : JSON.stringify(detail));
     err.refused = body.refused;
@@ -474,6 +507,14 @@ export const api = {
   purgePlan: (id: number, confirm: string) =>
     request<{ purged: number; bytes: number; problems: string[] }>("POST", `/api/plans/${id}/purge`, { confirm }),
   manualListUrl: (id: number, volume: string) => `/api/plans/${id}/manual-list/${volume}`,
+  authStatus: () => request<AuthStatus>("GET", "/api/auth/status"),
+  login: (password: string) => request<{ signed_in: boolean }>("POST", "/api/auth/login", { password }),
+  logout: () => request<{ signed_in: boolean }>("POST", "/api/auth/logout"),
+  remote: () => request<RemoteState>("GET", "/api/remote"),
+  updateRemote: (changes: Partial<RemoteSettings>) => request<RemoteState>("PUT", "/api/remote", changes),
+  setPassword: (password: string) => request<RemoteState>("POST", "/api/remote/password", { password }),
+  revokeSession: (id: string) => request<RemoteState>("POST", `/api/remote/sessions/${id}/revoke`),
+  cloudflared: (action: "start" | "stop") => request<RemoteState>("POST", `/api/remote/cloudflared/${action}`),
   folderPairs: (volume?: string, offset = 0) =>
     request<{ items: FolderPair[]; total: number }>("GET", `/api/review/folder-pairs${qs({ volume, offset })}`),
   discardFolderCopies: (keep: FolderSide, discard: FolderSide) =>

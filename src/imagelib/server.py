@@ -1,9 +1,13 @@
-"""HTTP API and static GUI, served on localhost only.
+"""HTTP API and static GUI, served on 127.0.0.1 only.
 
-Security: the API can list folders and stream photos, so besides binding to
-127.0.0.1 it rejects requests whose Host header is not local (DNS rebinding) and
-requires a custom header on every state-changing request (a cross-site page cannot
-send one without a CORS preflight, which is never granted).
+Security: the API can list folders, stream photos and move or delete files.
+* Requests are classified by ``remote.classify``: local (this machine), remote
+  (through Tailscale or Cloudflare, see remote.py) or forbidden (anything else,
+  including DNS-rebinding attempts with foreign Host headers).
+* Remote requests need the tunnel's identity *and* an app session; remote-access
+  settings and the password can only be changed locally.
+* Every state-changing request needs a custom header, which a cross-site page cannot
+  send without a CORS preflight (never granted); session cookies are SameSite=Strict.
 """
 
 from __future__ import annotations
@@ -21,37 +25,93 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import analyze, discover, formats, plans, queries, review, volumes
+from . import analyze, discover, formats, plans, queries, remote, review, volumes
 from .catalog import Catalog
 from .jobs import Busy, OnlineVolumes, PlanManager, RelateManager, ScanManager
 from .previews import PreviewStore
 from .search import hash_file
 
 UI_DIR = Path(__file__).parent / "ui"
-LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "testserver"}
 CSRF_HEADER = "x-imagelib"
+# Reachable without an app session when remote (the login screen needs them).
+REMOTE_PUBLIC = ("/api/auth/status", "/api/auth/login")
+# Never reachable remotely, even signed in.
+LOCAL_ONLY = ("/api/remote",)
 BROWSER_FORMATS = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "jpe": "image/jpeg", "jfif": "image/jpeg",
                    "png": "image/png", "gif": "image/gif", "webp": "image/webp", "bmp": "image/bmp"}
 
 
-class LocalOnly:
+class AccessControl:
     """Pure ASGI middleware (BaseHTTPMiddleware interferes with streaming responses)."""
 
-    def __init__(self, app):
+    def __init__(self, app, access: "AccessState"):
         self.app = app
+        self.access = access
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] == "http":
-            request = Request(scope)
-            problem = None
-            if request.url.hostname not in LOCAL_HOSTS:
-                problem = "forbidden host"
-            elif request.method not in ("GET", "HEAD", "OPTIONS") and request.headers.get(CSRF_HEADER) != "1":
-                problem = f"missing {CSRF_HEADER} header"
-            if problem:
-                await JSONResponse({"detail": problem}, status_code=403)(scope, receive, send)
-                return
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        request = Request(scope)
+        headers = {k.lower(): v for k, v in request.headers.items()}
+        verdict = remote.classify(headers, request.url.hostname, self.access.settings(), self.access.verifier)
+        scope.setdefault("state", {})["access"] = verdict
+        path = request.url.path
+        problem, status = None, 403
+        if verdict.kind == "forbidden":
+            problem = verdict.problem
+        elif request.method not in ("GET", "HEAD", "OPTIONS") and request.headers.get(CSRF_HEADER) != "1":
+            problem = f"missing {CSRF_HEADER} header"
+        elif verdict.kind == "remote" and path.startswith("/api/"):
+            if path.startswith(LOCAL_ONLY):
+                problem = "this can only be changed on the computer running the app"
+            elif not path.startswith(REMOTE_PUBLIC) and not remote.valid_session(
+                    self.access.catalog(), request.cookies.get(remote.SESSION_COOKIE)):
+                problem, status = "login required", 401
+        if problem:
+            body = {"detail": problem, "login": status == 401}
+            await JSONResponse(body, status_code=status)(scope, receive, send)
+            return
         await self.app(scope, receive, send)
+
+
+class AccessState:
+    """Settings for access control, cached between requests and reloaded after changes."""
+
+    def __init__(self, catalog_dir: Path):
+        self.catalog_dir = catalog_dir
+        self.verifier = remote.AccessVerifier()
+        self.throttle = remote.LoginThrottle()
+        self._settings: remote.RemoteSettings | None = None
+
+    def catalog(self) -> Catalog:
+        return Catalog.shared(self.catalog_dir)
+
+    def settings(self) -> remote.RemoteSettings:
+        if self._settings is None:
+            self._settings = remote.load_settings(self.catalog())
+        return self._settings
+
+    def invalidate(self) -> None:
+        self._settings = None
+
+
+class LoginRequest(BaseModel):
+    password: str
+
+
+class PasswordRequest(BaseModel):
+    password: str
+
+
+class RemoteUpdate(BaseModel):
+    tailscale_enabled: bool | None = None
+    tailscale_hosts: list[str] | None = None
+    tailscale_users: list[str] | None = None
+    cloudflare_enabled: bool | None = None
+    cloudflare_hosts: list[str] | None = None
+    cloudflare_team: str | None = None
+    cloudflare_aud: str | None = None
+    cloudflare_tunnel_token: str | None = None
 
 
 class AddVolume(BaseModel):
@@ -102,7 +162,8 @@ class ScanRequest(BaseModel):
     resume: bool = False           # unfinished scans on connected volumes
 
 
-def create_app(catalog_dir: Path, workers: int | None = None, auto_relate: bool = True) -> FastAPI:
+def create_app(catalog_dir: Path, workers: int | None = None, auto_relate: bool = True,
+               port: int = 8765) -> FastAPI:
     catalog_dir = Path(catalog_dir)
     Catalog.shared(catalog_dir)  # create / migrate up front
     online = OnlineVolumes(catalog_dir)
@@ -110,20 +171,30 @@ def create_app(catalog_dir: Path, workers: int | None = None, auto_relate: bool 
     scans = ScanManager(catalog_dir, online, workers=workers, relate_manager=relater)
     plan_runner = PlanManager(catalog_dir, online, relater)
     plan_runner.scans, scans.plans = scans, plan_runner
+    access = AccessState(catalog_dir)
+    tunnel = remote.CloudflaredProcess()
     phash_index = queries.PhashIndex()
 
     @asynccontextmanager
     async def lifespan(app):
         if auto_relate:
             relater.start()  # catches up after scans made by the command line; no-op when current
+        s = access.settings()
+        if s.cloudflare_enabled and s.cloudflare_tunnel_token and tunnel.binary():
+            try:
+                tunnel.start(s.cloudflare_tunnel_token)
+            except RuntimeError:
+                pass
         yield
+        tunnel.stop()
         relater.stop(wait=False)
         plan_runner.stop()
         await asyncio.to_thread(scans.shutdown)
 
     app = FastAPI(title="imagelib", lifespan=lifespan)
     app.state.scans = scans
-    app.add_middleware(LocalOnly)
+    app.state.access = access
+    app.add_middleware(AccessControl, access=access)
 
     def cat() -> Catalog:
         return Catalog.shared(catalog_dir)
@@ -440,6 +511,100 @@ def create_app(catalog_dir: Path, workers: int | None = None, auto_relate: bool 
             return refused(e)
         except ValueError as e:
             raise HTTPException(400, str(e))
+
+    # -- sign-in (remote devices) ---------------------------------------------------
+
+    @app.get("/api/auth/status")
+    def auth_status(request: Request):
+        v: remote.Verdict = request.scope["state"]["access"]
+        c = cat()
+        return {"local": v.kind == "local", "via": v.via, "identity": v.identity,
+                "signed_in": v.kind == "local" or remote.valid_session(c, request.cookies.get(remote.SESSION_COOKIE)),
+                "password_set": remote.has_password(c)}
+
+    @app.post("/api/auth/login")
+    async def auth_login(request: Request, req: LoginRequest):
+        v: remote.Verdict = request.scope["state"]["access"]
+        if v.kind == "local":
+            return {"signed_in": True}
+        client = remote.client_label({k.lower(): x for k, x in request.headers.items()}, v) or "unknown"
+        delay = access.throttle.delay(client)
+        if delay:
+            await asyncio.sleep(delay)
+        c = cat()
+        if not await asyncio.to_thread(remote.check_password, c, req.password):
+            access.throttle.failed(client)
+            raise HTTPException(401, "wrong password")
+        access.throttle.succeeded(client)
+        token = remote.create_session(c, v.via, client, request.headers.get("user-agent", ""))
+        response = JSONResponse({"signed_in": True})
+        response.set_cookie(remote.SESSION_COOKIE, token, max_age=remote.SESSION_DAYS * 86400,
+                            httponly=True, secure=True, samesite="strict", path="/")
+        return response
+
+    @app.post("/api/auth/logout")
+    def auth_logout(request: Request):
+        remote.end_session(cat(), request.cookies.get(remote.SESSION_COOKIE))
+        response = JSONResponse({"signed_in": False})
+        response.delete_cookie(remote.SESSION_COOKIE, path="/")
+        return response
+
+    # -- remote access settings (local only; enforced by AccessControl) -------------
+
+    def remote_state() -> dict:
+        c = cat()
+        return {"settings": access.settings().public(), "password_set": remote.has_password(c),
+                "sessions": remote.list_sessions(c), "tailscale": remote.tailscale_status(),
+                "tailscale_command": remote.tailscale_serve_command(port), "cloudflared": tunnel.status(),
+                "port": port}
+
+    @app.get("/api/remote")
+    def get_remote():
+        return remote_state()
+
+    @app.put("/api/remote")
+    def put_remote(req: RemoteUpdate):
+        c = cat()
+        s = remote.load_settings(c)
+        for key, value in req.model_dump(exclude_none=True).items():
+            setattr(s, key, value)
+        if s.any_enabled and not remote.has_password(c):
+            raise HTTPException(400, "set a password before turning on remote access")
+        if s.tailscale_enabled and not s.tailscale_hosts:
+            raise HTTPException(400, "enter this computer's Tailscale name (or use Detect)")
+        if s.cloudflare_enabled and not (s.cloudflare_hosts and s.cloudflare_team and s.cloudflare_aud):
+            raise HTTPException(400, "Cloudflare needs the public hostname, team name and application AUD tag")
+        remote.save_settings(c, s)
+        access.invalidate()
+        if not s.cloudflare_enabled:
+            tunnel.stop()
+        return remote_state()
+
+    @app.post("/api/remote/password")
+    def set_remote_password(req: PasswordRequest):
+        try:
+            remote.set_password(cat(), req.password)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return remote_state()
+
+    @app.post("/api/remote/sessions/{session_id}/revoke")
+    def revoke_remote_session(session_id: str):
+        remote.revoke_session(cat(), session_id)
+        return remote_state()
+
+    @app.post("/api/remote/cloudflared/{action}")
+    def cloudflared_action(action: str):
+        if action == "start":
+            try:
+                tunnel.start(access.settings().cloudflare_tunnel_token)
+            except RuntimeError as e:
+                raise HTTPException(400, str(e))
+        elif action == "stop":
+            tunnel.stop()
+        else:
+            raise HTTPException(404, "unknown action")
+        return remote_state()
 
     # -- action plans ------------------------------------------------------------
 

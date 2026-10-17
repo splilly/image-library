@@ -15,6 +15,7 @@ dependencies = [
     "pillow>=13.0.0",
     "pillow-heif>=1.8.1",
     "psd-tools>=1.25.0",
+    "pyjwt[crypto]>=2.15.1",
     "python-multipart>=0.0.32",
     "rawpy>=0.27.1",
     "simplejpeg>=1.9.0",

@@ -74,12 +74,12 @@ match to a larger image with the same aspect ratio. Outcome per thumbnail:
    thumbnail classification (incl. "not certain"), similar-image review.
 5. **Action plan (done)** — quarantine with per-file re-checks at execution time,
    journaled moves, restore, typed-confirmation purge, lists for read-only drives.
-6. **Hub/agent sync + remote access** — LAN sync, bundle export/import, relayed
-   actions; using the GUI from another device (see below).
+6. **Hub/agent sync + remote access** — remote access to the GUI is done (see below);
+   LAN sync, bundle export/import and relayed actions remain.
 7. **Packaging** — PyInstaller builds for all OSes via GitHub Actions; optional
    Organize/export of unique best originals into a date-based library.
 
-## Remote access (requested; part of milestone 6)
+## Remote access (done, ahead of the rest of milestone 6)
 
 Drive the GUI from another device (phone, laptop elsewhere). The API can browse
 folders, stream photos and move/delete files, so it must never be exposed without

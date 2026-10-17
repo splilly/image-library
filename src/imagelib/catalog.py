@@ -22,7 +22,7 @@ import unicodedata
 import uuid
 from pathlib import Path
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -221,6 +221,23 @@ _MIGRATIONS = {
     );
     CREATE INDEX plan_items_plan ON plan_items(plan_id, volume_id, status);
     CREATE INDEX plan_items_file ON plan_items(file_id);
+    """,
+    7: """
+    -- Settings of this installation (remote access etc.; see remote.py).
+    CREATE TABLE settings (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );
+    -- Signed-in remote devices. Only a hash of the session token is stored.
+    CREATE TABLE sessions (
+        token_hash   TEXT PRIMARY KEY,
+        created_at   REAL NOT NULL,
+        last_seen_at REAL NOT NULL,
+        expires_at   REAL NOT NULL,
+        via          TEXT NOT NULL,                  -- tailscale | cloudflare
+        client       TEXT NOT NULL,                  -- who/where, for the device list
+        user_agent   TEXT NOT NULL DEFAULT ''
+    );
     """,
 }
 

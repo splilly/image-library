@@ -334,7 +334,7 @@ def cmd_serve(args) -> int:
     from .server import create_app
 
     cat = open_catalog(args)
-    app = create_app(cat.dir, workers=args.workers)
+    app = create_app(cat.dir, workers=args.workers, port=args.port)
     url = f"http://127.0.0.1:{args.port}/"
     print(f"imagelib GUI: {url}   (catalog: {cat.dir})")
     print("Press Ctrl+C to stop; a running scan is paused and resumes next time.")

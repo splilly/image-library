@@ -103,7 +103,7 @@ button, input, select { font: inherit; color: inherit; }
   display: inline-flex;
 }
 .icon-btn:hover { background: var(--surface-2); color: var(--text); }
-input[type="text"], input:not([type]), select {
+input[type="text"], input[type="password"], input:not([type]), select {
   border: 1px solid var(--border); border-radius: 6px; background: var(--surface); padding: 6px 8px; min-width: 0;
 }
 input:focus-visible, select:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
@@ -362,3 +362,22 @@ kbd { font: 11px ui-monospace, Menlo, monospace; border: 1px solid var(--border)
 .item-purged { color: var(--muted); }
 .danger-zone { border-color: var(--bad); }
 @media (max-width: 900px) { .plans-layout { grid-template-columns: 1fr; } }
+
+/* -- sign-in & settings ----------------------------------------------------------------------- */
+.login { min-height: 100%; display: grid; place-items: center; padding: 16px; }
+.login-box { width: min(360px, 100%); background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 24px; display: grid; gap: 12px; box-shadow: var(--shadow); }
+.login-box .brand { padding: 0 0 4px; }
+.login-box input { width: 100%; }
+.settings .panel { display: grid; gap: 8px; }
+.settings .panel > .btn { justify-self: start; }
+.settings .panel.enabled { border-color: var(--ok); }
+.settings h2 { margin: 8px 0; }
+.settings h3 { margin: 0; text-transform: none; letter-spacing: 0; color: var(--text); font-size: 15px; }
+.settings h3 .muted { font-weight: normal; margin-left: 6px; }
+.settings .field input { width: 100%; }
+.settings .row input { flex: 1 1 200px; }
+.steps { margin: 4px 0; padding-left: 18px; display: grid; gap: 6px; }
+.cmd { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 0 16px; }
+.grid2 .field { margin: 6px 0; }
+.log { font: 11px ui-monospace, Menlo, monospace; background: var(--surface-2); padding: 8px; border-radius: 6px; max-height: 160px; overflow: auto; margin: 0; }

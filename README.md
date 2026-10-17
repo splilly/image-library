@@ -73,6 +73,24 @@ uv run imagelib gui                                # opens http://127.0.0.1:8765
 The server only listens on 127.0.0.1 and refuses requests from other sites. For GUI
 development run `uv run imagelib gui --no-browser` and `npm run dev` in `web/`.
 
+## Using it from another device (Settings → Remote access)
+
+The app only ever listens on this computer. To use it from a phone or another
+computer, set an app password and turn on one or both of:
+
+* **Tailscale**: your devices join a private network; nothing is exposed to the
+  internet. Run `tailscale serve --bg 8765` once on this computer, then open
+  `https://<this computer's Tailscale name>/` on the other device. Only this computer's
+  owner (or the Tailscale users you list) are let in.
+* **Cloudflare Tunnel + Access**: a public web address that works from any browser.
+  Create a tunnel pointing at `http://localhost:8765` and an Access application that
+  allows only your email, then enter the hostname, team name and AUD tag (and,
+  optionally, the tunnel token so the app runs `cloudflared` itself).
+
+Remote devices need both the tunnel's login and the app password; requests that
+arrive any other way are refused. Remote-access settings and the password can only be
+changed on this computer, and signed-in devices can be signed out from Settings.
+
 ## Carrying out decisions (Actions)
 
 Decisions change nothing on disk by themselves. An **action plan** snapshots the files

@@ -17,6 +17,7 @@ const PATHS: Record<string, string> = {
   up: "M12 19V5M5 12l7-7 7 7",
   upload: "M12 16V4M6 10l6-6 6 6M4 20h16",
   check: "M4 12l5 5L20 6",
+  gear: "M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6zM19.4 13a7.5 7.5 0 0 0 0-2l2-1.6-2-3.4-2.4 1a7.4 7.4 0 0 0-1.7-1L15 3.5h-4L10.7 6a7.4 7.4 0 0 0-1.7 1l-2.4-1-2 3.4L4.6 11a7.5 7.5 0 0 0 0 2l-2 1.6 2 3.4 2.4-1a7.4 7.4 0 0 0 1.7 1l.3 2.5h4l.3-2.5a7.4 7.4 0 0 0 1.7-1l2.4 1 2-3.4z",
 };
 
 export function Icon({ name, size = 18 }: { name: string; size?: number }) {

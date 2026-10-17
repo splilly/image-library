@@ -196,3 +196,15 @@ def test_where_finds_exact_copies_and_lookalikes(drive, catalog, tmp_path):
     similar = where(catalog, resized)
     assert rel["photo2"] in {loc.rel_path for loc in similar}
     assert not any(loc.exact for loc in similar)
+
+
+def test_content_from_an_older_analyzer_is_rechecked_on_the_next_scan(drive, catalog):
+    root, rel = drive
+    vid = register(catalog, root)
+    scan(catalog, root, vid)
+    zeroed = file_row(catalog, vid, rel["zeroed"])["content_hash"]
+    # Pretend an older analyzer once passed this file.
+    catalog.conn.execute("UPDATE contents SET analyzer_version=1, status='ok' WHERE hash=?", (zeroed,))
+    prog = scan(catalog, root, vid)
+    assert prog.files_total == 1
+    assert file_row(catalog, vid, rel["zeroed"])["status"] == "corrupt"

@@ -198,9 +198,14 @@ class Scanner:
             scan_id = existing["id"]
         else:
             scan_id = c.create_scan(volume_id, subpath)
-            # A fresh scan retries files that previously failed to read (loose cables happen).
+            # A fresh scan retries files that previously failed to read (loose cables happen),
+            # and re-checks content analyzed by an older, less thorough analyzer.
             c.conn.execute("UPDATE files SET state='pending' WHERE volume_id=? AND state='read_error'",
                            (volume_id,))
+            c.conn.execute(
+                "UPDATE files SET state='pending' WHERE volume_id=? AND state='done' AND content_hash IN "
+                "(SELECT hash FROM contents WHERE analyzer_version < ?)",
+                (volume_id, analyze.ANALYZER_VERSION))
         return Target(volume_id, label, Path(root), subpath, scan_id)
 
     def run(self, targets: list[Target]) -> dict[int, TargetProgress]:

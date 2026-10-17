@@ -18,3 +18,8 @@ legacy/node_modules/
 # Web GUI: dependencies, and the build output served by `imagelib gui`
 web/node_modules/
 src/imagelib/ui/
+
+# Packaging output
+dist/
+build/
+packaging/icon.*

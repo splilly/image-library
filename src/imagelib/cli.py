@@ -393,8 +393,10 @@ def cmd_serve(args) -> int:
     cat = open_catalog(args)
     app = create_app(cat.dir, workers=args.workers, port=args.port)
     url = f"http://127.0.0.1:{args.port}/"
-    print(f"imagelib GUI: {url}   (catalog: {cat.dir})")
-    print("Press Ctrl+C to stop; a running scan is paused and resumes next time.")
+    print(f"Image Library is running at {url}", flush=True)
+    print(f"Catalog: {cat.dir}")
+    print("Keep this window open while you use it. To stop: close this window or press Ctrl+C;")
+    print("a running scan is paused and resumes next time.", flush=True)
     if not args.no_browser:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
     # 127.0.0.1 only: the API can read your drives, so it must not be reachable from the network.
@@ -504,5 +506,9 @@ def main(argv: list[str] | None = None) -> int:
         import ctypes
         # Probing empty card readers must not pop up "There is no disk in the drive" dialogs.
         ctypes.windll.kernel32.SetErrorMode(0x0001 | 0x8000)
+    argv = sys.argv[1:] if argv is None else argv
+    if not argv or argv[:1] == ["--catalog"] and len(argv) == 2:
+        # Double-clicked (or run without a command): open the graphical interface.
+        argv = argv + ["gui"]
     args = build_parser().parse_args(argv)
     return args.func(args)

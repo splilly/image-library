@@ -316,6 +316,11 @@ class CloudflaredProcess:
 
     @staticmethod
     def binary() -> str | None:
+        if getattr(sys, "frozen", False):  # bundled next to the packaged app
+            bundled = os.path.join(os.path.dirname(sys.executable),
+                                   "cloudflared.exe" if sys.platform == "win32" else "cloudflared")
+            if os.path.exists(bundled):
+                return bundled
         found = shutil.which("cloudflared")
         if found:
             return found

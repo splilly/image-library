@@ -12,6 +12,7 @@ import io
 import json
 import multiprocessing
 import os
+import time
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -71,6 +72,7 @@ class Result:
     dhash: int | None = None
     metadata: dict[str, str] = field(default_factory=dict)
     previews: dict[str, bytes] = field(default_factory=dict)
+    seconds: float = 0.0      # time this analysis took in the worker
 
     def flag(self, status: str, problem: str) -> None:
         rank = {OK: 0, WARNING: 1, UNSUPPORTED: 2, CORRUPT: 3}
@@ -167,6 +169,7 @@ def analyze(job: Job) -> Result:
     init_worker()
     if _TEST_HOOKS and job.data is not None:
         _test_hook(job.data)
+    started = time.perf_counter()
     result = Result()
     reserved = _gate.reserve(_estimate_decode_bytes(job)) if _gate else 0
     try:
@@ -190,6 +193,7 @@ def analyze(job: Job) -> Result:
     finally:
         if reserved:
             _gate.release(reserved)
+        result.seconds = time.perf_counter() - started
     return result
 
 

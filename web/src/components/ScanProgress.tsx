@@ -12,6 +12,21 @@ const STATE_TEXT: Record<string, string> = {
   failed: "Failed",
 };
 
+const KIND = { image: "images", raw: "RAW", psd: "Photoshop", video: "videos" } as Record<string, string>;
+
+/** What limits the speed right now, in words: the drive, or the checking (CPU). */
+function Bottleneck({ t }: { t: TargetProgress }) {
+  const per = Object.entries(t.analysis_ms).map(([k, ms]) => `${KIND[k] ?? k} ${(ms / 1000).toFixed(2)} s each`).join(", ");
+  return (
+    <div className="scan-bottleneck small">
+      {t.bottleneck === "drive"
+        ? <>Limited by the drive: files arrive at {bytes(t.disk_rate_bps)}/s while being read.</>
+        : <>Limited by checking files ({t.workers} at a time{per ? `; ${per}` : ""}). The drive could deliver
+            {" "}{bytes(t.disk_rate_bps)}/s.</>}
+    </div>
+  );
+}
+
 export function ScanProgress({ t }: { t: TargetProgress }) {
   const discovering = t.state === "discovering" || t.state === "starting";
   const live = t.state === "analyzing" || discovering;
@@ -45,6 +60,7 @@ export function ScanProgress({ t }: { t: TargetProgress }) {
           </>
         )}
       </div>
+      {live && !discovering && t.bottleneck && <Bottleneck t={t} />}
       {live && t.current && <div className="scan-current" title={t.current}>{t.current}</div>}
       {t.message && <div className="scan-message">{t.message}</div>}
     </div>

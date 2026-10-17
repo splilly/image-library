@@ -89,15 +89,37 @@ class TargetProgress:
     current: str = ""
     rate_bps: float = 0.0
     eta_s: float | None = None
+    # Where the time goes, over the last 30 s: is the drive or the checking the limit?
+    workers: int = 0
+    bottleneck: str = ""              # "drive" | "checking" | ""
+    disk_rate_bps: float = 0.0        # speed of the drive while files are being read
+    analysis_ms: dict = field(default_factory=dict)   # average checking time per file, by kind
+    _read_s: float = field(default=0.0, repr=False)    # reader: opening, reading, hashing
+    _read_bytes: int = field(default=0, repr=False)
+    _wait_s: float = field(default=0.0, repr=False)    # reader: blocked because checking is behind
+    _analysis: dict = field(default_factory=dict, repr=False)   # kind -> [files, seconds]
     _samples: deque = field(default_factory=lambda: deque(maxlen=64), repr=False)
 
     def sample(self, now: float) -> None:
-        self._samples.append((now, self.bytes_done))
+        self._samples.append((now, self.bytes_done, self._read_s, self._read_bytes, self._wait_s,
+                              {k: tuple(v) for k, v in self._analysis.items()}))
         while len(self._samples) > 2 and now - self._samples[0][0] > 30:
             self._samples.popleft()
-        t0, b0 = self._samples[0]
-        if now - t0 > 0.5:
-            self.rate_bps = (self.bytes_done - b0) / (now - t0)
+        t0, b0, r0, rb0, w0, a0 = self._samples[0]
+        span = now - t0
+        if span > 0.5:
+            self.rate_bps = (self.bytes_done - b0) / span
+            read_s, wait_s = self._read_s - r0, self._wait_s - w0
+            if read_s > 0:
+                self.disk_rate_bps = (self._read_bytes - rb0) / read_s
+            self.bottleneck = ("checking" if wait_s > 0.5 * span else
+                               "drive" if read_s > 0.5 * span else "")
+            ms = {}
+            for kind, (n, secs) in self._analysis.items():
+                n0, s0 = a0.get(kind, (0, 0.0))
+                if n - n0 > 0:
+                    ms[kind] = round(1000 * (secs - s0) / (n - n0))
+            self.analysis_ms = ms
         remaining = self.bytes_total - self.bytes_done
         self.eta_s = remaining / self.rate_bps if self.rate_bps > 0 else None
 
@@ -214,7 +236,7 @@ class Scanner:
 
     def run(self, targets: list[Target]) -> dict[int, TargetProgress]:
         for t in targets:
-            self.progress[t.scan_id] = TargetProgress(t.volume_id, t.label, t.scan_id)
+            self.progress[t.scan_id] = TargetProgress(t.volume_id, t.label, t.scan_id, workers=self.workers)
         self._pending_writes: list[tuple[str, tuple]] = []
         self._pending_previews: list[tuple[bytes, str, bytes]] = []
         self._inflight: dict[bytes, _Inflight] = {}
@@ -301,8 +323,11 @@ class Scanner:
         size_hint = row["size"]
         inline = row["kind"] != formats.VIDEO and size_hint <= INLINE_LIMIT
         reserve = size_hint if inline else 0
+        waited = time.monotonic()
         if not self.budget.acquire(reserve, self.stop_event.is_set):
             return
+        started = time.monotonic()
+        prog._wait_s += started - waited
         try:
             st = os.stat(path)
             if inline and st.st_size <= INLINE_LIMIT:
@@ -323,11 +348,15 @@ class Scanner:
             state = "missing" if isinstance(e, FileNotFoundError) else "read_error"
             self._post(_Failed(t, row["id"], size_hint, state, f"{type(e).__name__}: {e}"))
             return
+        prog._read_s += time.monotonic() - started
+        prog._read_bytes += st.st_size
         if data is not None and len(data) != reserve:  # file changed size since discovery
             self.budget.release(reserve)
             self.budget.acquire(len(data), lambda: False)
+        waited = time.monotonic()
         self._post(_Read(t, row["id"], row["rel_path"], row["kind"], st.st_size, st.st_mtime_ns, h, data,
                          path if isinstance(path, str) else os.fsdecode(path)))
+        prog._wait_s += time.monotonic() - waited
 
     def _post(self, msg) -> None:
         self.queue.put(msg)  # the dispatcher always drains until every reader reports done
@@ -529,6 +558,10 @@ class Scanner:
              r.orientation, int(r.has_exif), r.duration_s, to_signed64(r.phash), to_signed64(r.dhash),
              r.pixel_hash, int(bool(r.previews)), r.metadata_json(), analyze.ANALYZER_VERSION, time.time()))
         self._known.add(h)
+        if entry.waiters and r.seconds:
+            stats = self.progress[entry.waiters[0].target.scan_id]._analysis.setdefault(entry.job.kind, [0, 0.0])
+            stats[0] += 1
+            stats[1] += r.seconds
         for i, msg in enumerate(entry.waiters):
             prog = self.progress[msg.target.scan_id]
             if i == 0:

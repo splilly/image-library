@@ -385,3 +385,4 @@ kbd { font: 11px ui-monospace, Menlo, monospace; border: 1px solid var(--border)
 .item-relayed { background: var(--accent-soft); color: var(--accent); }
 .organize-new { display: grid; gap: 10px; }
 .organize-new > .btn { justify-self: start; }
+.scan-bottleneck { margin-top: 6px; color: var(--muted); }

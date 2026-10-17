@@ -371,8 +371,9 @@ class Catalog:
 
     # -- connections -------------------------------------------------------
 
-    def connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=60, isolation_level=None)
+    def connect(self, shared: bool = False) -> sqlite3.Connection:
+        """A new connection; ``shared`` allows several threads to use it (the caller serialises access)."""
+        conn = sqlite3.connect(self.db_path, timeout=60, isolation_level=None, check_same_thread=not shared)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")

@@ -2,9 +2,11 @@
 
 Threads and processes
 ---------------------
-* One **reader thread per volume** walks the volume and then reads pending files
-  sequentially in path order. Spinning disks are slow at parallel random reads, so
-  each disk gets exactly one reader while different disks run in parallel.
+* Each volume is walked, then its pending files are read in path order by **one or
+  more reader threads**. How many is found per drive while scanning (ReadController):
+  a spinning disk gets slower with parallel reads (seeking) and stays at one; an SSD,
+  especially behind USB or an antivirus that inspects each file as it is opened, gets
+  faster and is given more. Different drives always run in parallel.
   Each file is read once: the bytes are hashed with BLAKE3 and handed to analysis.
 * A **process pool** decodes, verifies, hashes perceptually and renders previews.
   Content already in the catalog (another copy of the same file) is not analyzed again.
@@ -53,6 +55,86 @@ WORKER_RAM = int(1.5 * GB)           # default worker count allows this much RAM
 LOW_MEMORY = 0.10                    # pause handing out work below this fraction free
 COMMIT_INTERVAL = 1.0
 ANALYSIS_TIMEOUT = 600.0             # seconds before a stuck decoder is killed
+MAX_READERS = 8                      # parallel reads per drive, at most
+READ_WINDOW = 12.0                   # seconds of reading per measurement when tuning readers
+READ_GAIN = 1.15                     # more readers must bring at least this much more throughput
+REPROBE_AFTER = 300.0                # re-check the best reader count this often (seconds)
+
+
+class ReadController:
+    """Finds how many parallel reads suit a drive, by trying more and keeping what helps.
+
+    Only adjusts while the drive is the bottleneck (the readers are not waiting for
+    analysis). Doubles the readers while each step brings at least READ_GAIN more
+    throughput, steps back as soon as one does not, and re-checks every few minutes
+    because folders differ (big RAW files, tiny thumbnails).
+    """
+
+    def __init__(self, start: int = 1):
+        self.readers = max(1, min(MAX_READERS, start))
+        self.settled = False
+        self._last_rate: float | None = None
+        self._window: tuple[float, int, float] | None = None
+        self._settled_at = 0.0
+
+    def tick(self, now: float, prog: "TargetProgress") -> None:
+        if self._window is None:
+            self._window = (now, prog._read_bytes, prog._wait_s)
+            return
+        t0, b0, w0 = self._window
+        span = now - t0
+        if span < READ_WINDOW:
+            return
+        self._window = (now, prog._read_bytes, prog._wait_s)
+        rate = (prog._read_bytes - b0) / span
+        drive_bound = (prog._wait_s - w0) < 0.25 * span * self.readers
+        if self.settled:
+            if now - self._settled_at > REPROBE_AFTER:
+                self.settled, self._last_rate = False, None
+            return
+        if not drive_bound or rate <= 0:
+            self._last_rate = None  # analysis is the limit: more readers would not help
+            return
+        if self._last_rate is None or rate > self._last_rate * READ_GAIN:
+            self._last_rate = rate
+            if self.readers < MAX_READERS:
+                self.readers = min(MAX_READERS, self.readers * 2)
+            else:
+                self._settle(now)
+        else:
+            self.readers = max(1, self.readers // 2)  # the last step did not help: undo it
+            self._settle(now)
+
+    def _settle(self, now: float) -> None:
+        self.settled, self._settled_at = True, now
+
+
+class _RowFeed:
+    """Pending files of a volume in path order, handed out to several reader threads."""
+
+    def __init__(self, conn, volume_id: str, prefix: str):
+        self.conn = conn
+        self.volume_id = volume_id
+        self.prefix = prefix
+        self.lock = threading.Lock()
+        self.buffer: deque = deque()
+        self.last = ""
+        self.exhausted = False
+
+    def next(self):
+        with self.lock:
+            if not self.buffer and not self.exhausted:
+                rows = self.conn.execute(
+                    "SELECT id, rel_path, rel_path_raw, kind, size FROM files WHERE volume_id=? "
+                    "AND rel_path > ? AND state='pending' AND substr(rel_path,1,?)=? "
+                    "ORDER BY rel_path LIMIT 500",
+                    (self.volume_id, self.last, len(self.prefix), self.prefix)).fetchall()
+                if rows:
+                    self.buffer.extend(rows)
+                    self.last = rows[-1]["rel_path"]
+                else:
+                    self.exhausted = True
+            return self.buffer.popleft() if self.buffer else None
 
 
 @dataclass
@@ -91,13 +173,15 @@ class TargetProgress:
     eta_s: float | None = None
     # Where the time goes, over the last 30 s: is the drive or the checking the limit?
     workers: int = 0
+    readers: int = 1                  # parallel reads on this drive right now
     bottleneck: str = ""              # "drive" | "checking" | ""
-    disk_rate_bps: float = 0.0        # speed of the drive while files are being read
+    disk_rate_bps: float = 0.0        # what the drive delivers while files are being read
     analysis_ms: dict = field(default_factory=dict)   # average checking time per file, by kind
     _read_s: float = field(default=0.0, repr=False)    # reader: opening, reading, hashing
     _read_bytes: int = field(default=0, repr=False)
     _wait_s: float = field(default=0.0, repr=False)    # reader: blocked because checking is behind
     _analysis: dict = field(default_factory=dict, repr=False)   # kind -> [files, seconds]
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _samples: deque = field(default_factory=lambda: deque(maxlen=64), repr=False)
 
     def sample(self, now: float) -> None:
@@ -110,10 +194,12 @@ class TargetProgress:
         if span > 0.5:
             self.rate_bps = (self.bytes_done - b0) / span
             read_s, wait_s = self._read_s - r0, self._wait_s - w0
+            # Reader time is summed over the parallel readers.
+            busy = span * self.readers
             if read_s > 0:
-                self.disk_rate_bps = (self._read_bytes - rb0) / read_s
-            self.bottleneck = ("checking" if wait_s > 0.5 * span else
-                               "drive" if read_s > 0.5 * span else "")
+                self.disk_rate_bps = (self._read_bytes - rb0) / read_s * self.readers
+            self.bottleneck = ("checking" if wait_s > 0.5 * busy else
+                               "drive" if read_s > 0.5 * busy else "")
             ms = {}
             for kind, (n, secs) in self._analysis.items():
                 n0, s0 = a0.get(kind, (0, 0.0))
@@ -235,8 +321,11 @@ class Scanner:
         return Target(volume_id, label, Path(root), subpath, scan_id, ref)
 
     def run(self, targets: list[Target]) -> dict[int, TargetProgress]:
+        self.controllers: dict[int, ReadController] = {}
         for t in targets:
-            self.progress[t.scan_id] = TargetProgress(t.volume_id, t.label, t.scan_id, workers=self.workers)
+            self.controllers[t.scan_id] = ReadController(self._remembered_readers(t.volume_id))
+            self.progress[t.scan_id] = TargetProgress(t.volume_id, t.label, t.scan_id, workers=self.workers,
+                                                      readers=self.controllers[t.scan_id].readers)
         self._pending_writes: list[tuple[str, tuple]] = []
         self._pending_previews: list[tuple[bytes, str, bytes]] = []
         self._inflight: dict[bytes, _Inflight] = {}
@@ -263,7 +352,21 @@ class Scanner:
         finally:
             self._pool.shutdown(wait=False, cancel_futures=True)
             self._flush()
+            for t in targets:
+                ctrl = self.controllers[t.scan_id]
+                if ctrl.settled:
+                    self._remember_readers(t.volume_id, ctrl.readers)
         return self.progress
+
+    # Each drive's best reader count is remembered, so the next scan starts there.
+    def _remembered_readers(self, volume_id: str) -> int:
+        row = self.catalog.conn.execute("SELECT value FROM settings WHERE key = ?",
+                                        (f"readers:{volume_id}",)).fetchone()
+        return int(row[0]) if row else 1
+
+    def _remember_readers(self, volume_id: str, readers: int) -> None:
+        self.catalog.conn.execute("INSERT INTO settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE "
+                                  "SET value = excluded.value", (f"readers:{volume_id}", str(readers)))
 
     # -- reader threads ----------------------------------------------------
 
@@ -294,22 +397,38 @@ class Scanner:
                 "SELECT count(*), coalesce(sum(size),0) FROM files WHERE volume_id=? AND state='pending' "
                 "AND substr(rel_path,1,?)=?", (t.volume_id, len(prefix), prefix)).fetchone()
             prog.files_total, prog.bytes_total = row[0], row[1]
-
-            last = ""
-            while not self.stop_event.is_set():
-                rows = conn.execute(
-                    "SELECT id, rel_path, rel_path_raw, kind, size FROM files WHERE volume_id=? "
-                    "AND rel_path > ? AND state='pending' AND substr(rel_path,1,?)=? "
-                    "ORDER BY rel_path LIMIT 500",
-                    (t.volume_id, last, len(prefix), prefix)).fetchall()
-                if not rows:
-                    break
-                for row in rows:
-                    if self.stop_event.is_set():
-                        break
-                    last = row["rel_path"]
-                    self._read_one(t, row)
             conn.close()
+
+            feed_conn = self.catalog.connect(shared=True)
+            feed = _RowFeed(feed_conn, t.volume_id, prefix)
+            ctrl = self.controllers[t.scan_id]
+            problems: list[Exception] = []
+
+            def read_loop(index: int) -> None:
+                while not self.stop_event.is_set() and not problems:
+                    if index >= ctrl.readers:  # not needed right now
+                        if feed.exhausted:
+                            return
+                        time.sleep(0.2)
+                        continue
+                    row = feed.next()
+                    if row is None:
+                        return
+                    try:
+                        self._read_one(t, row)
+                    except Exception as e:  # VolumeOffline or unexpected: stop this volume
+                        problems.append(e)
+                        return
+
+            threads = [threading.Thread(target=read_loop, args=(i,), name=f"reader-{t.label}-{i}", daemon=True)
+                       for i in range(MAX_READERS)]
+            for th in threads:
+                th.start()
+            for th in threads:
+                th.join()
+            feed_conn.close()
+            if problems:
+                raise problems[0]
             self._post(_ReaderDone(t, "paused" if self.stop_event.is_set() else "done"))
         except discover.VolumeOffline as e:
             self._post(_ReaderDone(t, "offline", f"drive disconnected: {e}"))
@@ -327,20 +446,10 @@ class Scanner:
         if not self.budget.acquire(reserve, self.stop_event.is_set):
             return
         started = time.monotonic()
-        prog._wait_s += started - waited
+        with prog._lock:
+            prog._wait_s += started - waited
         try:
-            st = os.stat(path)
-            if inline and st.st_size <= INLINE_LIMIT:
-                with open(path, "rb") as f:
-                    data = f.read()
-                h = blake3.blake3(data, max_threads=blake3.blake3.AUTO).digest()
-            else:
-                data = None
-                hasher = blake3.blake3(max_threads=blake3.blake3.AUTO)
-                with open(path, "rb") as f:
-                    while chunk := f.read(READ_CHUNK):
-                        hasher.update(chunk)
-                h = hasher.digest()
+            st, data, h = self._read_file(path, inline)
         except OSError as e:
             self.budget.release(reserve)
             if not t.present():
@@ -348,15 +457,31 @@ class Scanner:
             state = "missing" if isinstance(e, FileNotFoundError) else "read_error"
             self._post(_Failed(t, row["id"], size_hint, state, f"{type(e).__name__}: {e}"))
             return
-        prog._read_s += time.monotonic() - started
-        prog._read_bytes += st.st_size
+        with prog._lock:
+            prog._read_s += time.monotonic() - started
+            prog._read_bytes += st.st_size
         if data is not None and len(data) != reserve:  # file changed size since discovery
             self.budget.release(reserve)
             self.budget.acquire(len(data), lambda: False)
         waited = time.monotonic()
         self._post(_Read(t, row["id"], row["rel_path"], row["kind"], st.st_size, st.st_mtime_ns, h, data,
                          path if isinstance(path, str) else os.fsdecode(path)))
-        prog._wait_s += time.monotonic() - waited
+        with prog._lock:
+            prog._wait_s += time.monotonic() - waited
+
+    @staticmethod
+    def _read_file(path, inline: bool):
+        """Stat, read and hash one file: (stat, bytes or None, BLAKE3 digest)."""
+        st = os.stat(path)
+        if inline and st.st_size <= INLINE_LIMIT:
+            with open(path, "rb") as f:
+                data = f.read()
+            return st, data, blake3.blake3(data, max_threads=blake3.blake3.AUTO).digest()
+        hasher = blake3.blake3(max_threads=blake3.blake3.AUTO)
+        with open(path, "rb") as f:
+            while chunk := f.read(READ_CHUNK):
+                hasher.update(chunk)
+        return st, None, hasher.digest()
 
     def _post(self, msg) -> None:
         self.queue.put(msg)  # the dispatcher always drains until every reader reports done
@@ -621,7 +746,11 @@ class Scanner:
 
     def _update_progress(self) -> None:
         now = time.monotonic()
-        for prog in self.progress.values():
+        for scan_id, prog in self.progress.items():
+            if prog.state == "analyzing":
+                ctrl = self.controllers[scan_id]
+                ctrl.tick(now, prog)
+                prog.readers = ctrl.readers
             prog.sample(now)
         if self.progress_cb:
             self.progress_cb(list(self.progress.values()))

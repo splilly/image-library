@@ -82,6 +82,7 @@ export interface TargetProgress {
   rate_bps: number;
   eta_s: number | null;
   workers: number;
+  readers: number;
   bottleneck: "drive" | "checking" | "";
   disk_rate_bps: number;
   analysis_ms: Record<string, number>;

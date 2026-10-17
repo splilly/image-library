@@ -20,7 +20,8 @@ function Bottleneck({ t }: { t: TargetProgress }) {
   return (
     <div className="scan-bottleneck small">
       {t.bottleneck === "drive"
-        ? <>Limited by the drive: files arrive at {bytes(t.disk_rate_bps)}/s while being read.</>
+        ? <>Limited by the drive: files arrive at {bytes(t.disk_rate_bps)}/s with {t.readers} parallel{" "}
+            {t.readers === 1 ? "read" : "reads"} (tuned automatically for this drive).</>
         : <>Limited by checking files ({t.workers} at a time{per ? `; ${per}` : ""}). The drive could deliver
             {" "}{bytes(t.disk_rate_bps)}/s.</>}
     </div>

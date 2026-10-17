@@ -115,7 +115,7 @@ class ProgressPrinter:
                 f"{human_bytes(p.rate_bps)}/s  ETA {human_duration(p.eta_s)}  "
                 f"corrupt {p.corrupt}  warn {p.warnings}  copies {p.reused}  read-err {p.read_errors}")
         if p.bottleneck == "drive":
-            text += f"  [limited by the drive: {human_bytes(p.disk_rate_bps)}/s]"
+            text += f"  [limited by the drive: {human_bytes(p.disk_rate_bps)}/s with {p.readers} parallel reads]"
         elif p.bottleneck == "checking":
             per = ", ".join(f"{k} {v} ms" for k, v in sorted(p.analysis_ms.items()))
             text += f"  [limited by checking, {p.workers} workers: {per}]"

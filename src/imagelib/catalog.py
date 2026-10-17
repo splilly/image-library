@@ -22,7 +22,7 @@ import unicodedata
 import uuid
 from pathlib import Path
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -293,6 +293,26 @@ _MIGRATIONS = {
         error           TEXT,
         reported        INTEGER NOT NULL DEFAULT 0
     );
+    """,
+    9: """
+    -- Organize: copying the best unique originals into a new, date-sorted library (organize.py).
+    CREATE TABLE exports (
+        id         INTEGER PRIMARY KEY,
+        target     TEXT NOT NULL,                     -- folder on this computer
+        options    TEXT NOT NULL,                     -- JSON
+        created_at REAL NOT NULL
+    );
+    CREATE TABLE export_items (
+        id           INTEGER PRIMARY KEY,
+        export_id    INTEGER NOT NULL REFERENCES exports(id),
+        content_hash BLOB NOT NULL,
+        size         INTEGER NOT NULL,
+        dest         TEXT NOT NULL,                   -- relative to the target, '/' separated
+        status       TEXT NOT NULL,                   -- pending | copying | done | failed
+        error        TEXT,
+        UNIQUE (export_id, dest)
+    );
+    CREATE INDEX export_items_status ON export_items(export_id, status);
     """,
 }
 

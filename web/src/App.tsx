@@ -6,6 +6,7 @@ import Drives from "./pages/Drives";
 import Find from "./pages/Find";
 import Library from "./pages/Library";
 import Login from "./pages/Login";
+import Organize from "./pages/Organize";
 import Settings from "./pages/Settings";
 import Review from "./pages/Review";
 import { Icon } from "./components/Icon";
@@ -16,6 +17,7 @@ const PAGES = [
   { id: "library", label: "Library", icon: "grid" },
   { id: "review", label: "Review", icon: "check" },
   { id: "actions", label: "Actions", icon: "play" },
+  { id: "organize", label: "Organize", icon: "folder" },
   { id: "drives", label: "Drives", icon: "drive" },
   { id: "find", label: "Find image", icon: "search" },
   { id: "settings", label: "Settings", icon: "gear" },
@@ -55,6 +57,11 @@ export default function App() {
             <span className="pulse" /> <span>Moving files to quarantine</span>
           </a>
         )}
+        {scan?.export?.running && (
+          <a href="#/organize" className="nav-scan" title="Copying into a new library">
+            <span className="pulse" /> <span>Organizing</span>
+          </a>
+        )}
         {scan?.running && (
           <a href="#/dashboard" className="nav-scan" title="A scan is running">
             <span className="pulse" /> <span>Scanning {active.length > 1 ? `${active.length} drives` : active[0]?.label ?? ""}</span>
@@ -70,6 +77,8 @@ export default function App() {
           <Review params={route.params} scan={scan} />
         ) : route.page === "drives" ? (
           <Drives scan={scan} />
+        ) : route.page === "organize" ? (
+          <Organize scan={scan} />
         ) : route.page === "settings" ? (
           <Settings auth={auth} />
         ) : route.page === "find" ? (

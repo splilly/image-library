@@ -134,7 +134,7 @@ def test_old_catalogs_are_upgraded(tmp_path):
     conn.close()
 
     cat = Catalog(path)
-    assert cat.conn.execute("PRAGMA user_version").fetchone()[0] == 8
+    assert cat.conn.execute("PRAGMA user_version").fetchone()[0] == 9
     row = cat.get_volume("v1")
     assert row["label"] == "Old drive" and row["read_only"] == 0
 

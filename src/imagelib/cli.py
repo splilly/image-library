@@ -380,6 +380,31 @@ def cmd_bundle(args) -> int:
     return 0
 
 
+def cmd_organize(args) -> int:
+    from . import organize, relate
+
+    cat = open_catalog(args)
+    if args.resume:
+        export_id = args.resume
+    else:
+        if not args.target:
+            print("Give a target folder, or --resume ID.")
+            return 1
+        if not relate.is_current(cat):
+            print("Finding thumbnails and similar images first...", flush=True)
+            relate.run(cat)
+        e = organize.create(cat, Path(args.target), organize.Options(
+            include_videos=not args.no_videos, include_raw=not args.no_raw, include_damaged=args.include_damaged))
+        export_id = e["id"]
+        print(f"Export {export_id}: {e['items']:,} pictures, {human_bytes(e['bytes'])}.", flush=True)
+    prog = organize.run(cat, export_id, volumes.locate_online(cat))
+    print(f"Copied {prog.copied:,} files ({human_bytes(prog.copied_bytes)}); {prog.failed:,} failed; "
+          f"{prog.waiting:,} waiting for drives: {', '.join(prog.waiting_volumes) or '-'}.")
+    if prog.waiting:
+        print(f"Connect them and run `imagelib organize --resume {export_id}`.")
+    return 0 if prog.failed == 0 else 2
+
+
 # -- GUI ------------------------------------------------------------------------
 
 def cmd_serve(args) -> int:
@@ -478,6 +503,14 @@ def build_parser() -> argparse.ArgumentParser:
     bimp = bundle.add_parser("import", help="merge a bundle from another computer")
     bimp.add_argument("file")
     bimp.set_defaults(func=cmd_bundle)
+
+    org = sub.add_parser("organize", help="copy one of each picture into a new library sorted by date")
+    org.add_argument("target", nargs="?", help="folder for the new library")
+    org.add_argument("--resume", type=int, metavar="ID", help="continue an earlier export")
+    org.add_argument("--no-videos", action="store_true")
+    org.add_argument("--no-raw", action="store_true")
+    org.add_argument("--include-damaged", action="store_true")
+    org.set_defaults(func=cmd_organize)
 
     sub.add_parser("relate", help="find thumbnails, resized and near-identical copies (resumable)") \
         .set_defaults(func=cmd_relate)

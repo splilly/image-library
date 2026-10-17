@@ -12,7 +12,7 @@ import time
 from dataclasses import fields
 from pathlib import Path
 
-from . import plans, relate, sync, volumes
+from . import organize, plans, relate, sync, volumes
 from .catalog import Catalog
 from .previews import PreviewStore
 from .scanner import Scanner, TargetProgress
@@ -155,6 +155,55 @@ class PlanManager:
         return None if p is None else {**vars(p), "running": self.running}
 
 
+class ExportManager:
+    """Runs one Organize export at a time in the background (never alongside a scan or a plan)."""
+
+    def __init__(self, catalog_dir: Path, online: OnlineVolumes):
+        self.catalog_dir = catalog_dir
+        self.online = online
+        self.scans: ScanManager | None = None
+        self.plans: PlanManager | None = None
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
+        self.progress: organize.Progress | None = None
+
+    @property
+    def running(self) -> bool:
+        return self._thread is not None
+
+    def start(self, export_id: int) -> None:
+        with self._lock:
+            if self._thread is not None:
+                raise Busy("an export is already running")
+            if (self.scans and self.scans.running) or (self.plans and self.plans.running):
+                raise Busy("wait for the running scan or action plan to finish")
+            self._stop.clear()
+            self.progress = organize.Progress(export_id, state="starting")
+            self._thread = threading.Thread(target=self._run, args=(export_id,), name="export", daemon=True)
+            self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def _run(self, export_id: int) -> None:
+        try:
+            def on_progress(p: organize.Progress) -> None:
+                self.progress = organize.Progress(**{**vars(p), "waiting_volumes": list(p.waiting_volumes)})
+
+            organize.run(Catalog.shared(self.catalog_dir), export_id, self.online.get(force=True),
+                         self._stop.is_set, on_progress)
+        except Exception as e:
+            self.progress = organize.Progress(export_id, state="failed", message=f"{type(e).__name__}: {e}")
+        finally:
+            with self._lock:
+                self._thread = None
+
+    def state(self) -> dict | None:
+        p = self.progress
+        return None if p is None else {**vars(p), "running": self.running}
+
+
 class SyncManager:
     """Agent side: exchanges with the hub after every scan session and every few minutes."""
 
@@ -221,6 +270,7 @@ class ScanManager:
         self.relate = relate_manager  # paused while scanning, run when scanning ends
         self.plans: PlanManager | None = None
         self.sync: SyncManager | None = None  # an agent sends its results after every scan session
+        self.exports: ExportManager | None = None
         self.online = online
         self.workers = workers
         self._lock = threading.Lock()
@@ -237,6 +287,8 @@ class ScanManager:
     def start(self, requests: list[tuple[str, str]]) -> None:
         if self.plans and self.plans.running:
             raise Busy("an action plan is running; wait for it to finish or pause it")
+        if self.exports and self.exports.running:
+            raise Busy("an export is running; wait for it to finish or pause it")
         with self._lock:
             for req in requests:
                 self._wanted[req] = None
@@ -279,6 +331,8 @@ class ScanManager:
             state["relate"] = self.relate.state()
         if self.plans:
             state["plan"] = self.plans.state()
+        if self.exports:
+            state["export"] = self.exports.state()
         return state
 
     # -- runner ------------------------------------------------------------

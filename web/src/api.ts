@@ -138,6 +138,29 @@ export interface PlanItem {
   hash: string | null;
 }
 
+export interface ExportProgress {
+  export_id: number;
+  state: string;
+  total: number;
+  done: number;
+  copied: number;
+  copied_bytes: number;
+  failed: number;
+  waiting: number;
+  current: string;
+  message: string;
+  waiting_volumes: string[];
+  running: boolean;
+}
+
+export interface ExportInfo {
+  id: number;
+  target: string;
+  options: { include_videos: boolean; include_raw: boolean; include_damaged: boolean };
+  created_at: number;
+  counts: Counts;
+}
+
 export interface ScanState {
   running: boolean;
   pausing: boolean;
@@ -146,6 +169,7 @@ export interface ScanState {
   version: number;
   relate?: RelateState;
   plan?: PlanProgress | null;
+  export?: ExportProgress | null;
 }
 
 export interface FileItem {
@@ -550,6 +574,11 @@ export const api = {
     form.append("file", file);
     return request<{ files: number; contents: number; previews: number }>("POST", "/api/remote/bundle/import", form);
   },
+  createExport: (target: string, opts: { include_videos: boolean; include_raw: boolean; include_damaged: boolean }) =>
+    request<{ id: number; items: number; bytes: number }>("POST", "/api/organize", { target, ...opts }),
+  exports: () => request<ExportInfo[]>("GET", "/api/organize"),
+  runExport: (id: number) => request<ExportProgress>("POST", `/api/organize/${id}/run`),
+  pauseExport: (id: number) => request<ExportProgress>("POST", `/api/organize/${id}/pause`),
   folderPairs: (volume?: string, offset = 0) =>
     request<{ items: FolderPair[]; total: number }>("GET", `/api/review/folder-pairs${qs({ volume, offset })}`),
   discardFolderCopies: (keep: FolderSide, discard: FolderSide) =>

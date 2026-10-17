@@ -22,11 +22,21 @@ design and roadmap (GUI, thumbnail review, quarantine, multi-machine hub).
 
 ## Status
 
-Milestones 1–6 of 7: the catalog and scanning engine, a command line interface, the
-graphical interface (overview with live scan progress, drives, library browser, "find
-this image"), review screens for problem files, duplicates, thumbnails and
-near-identical images, action plans that carry out decisions safely, remote access,
-and several computers sharing one catalog (hub & agents). Packaging is milestone 7.
+All seven planned milestones are in place: scanning and verification, the graphical
+interface, review of problem files, duplicates, thumbnails and similar images, action
+plans that carry out decisions safely, remote access, several computers sharing one
+catalog (hub & agents), self-contained builds, and Organize (a clean, date-sorted copy).
+
+## Download and run
+
+Self-contained builds for Windows, macOS and Linux are produced by the GitHub Actions
+workflow (`.github/workflows/build.yml`; run it from the Actions tab or push a `v*` tag).
+Unzip and run `imagelib` (`imagelib.exe` on Windows): it opens in your browser. Nothing
+else needs installing. The builds are not code-signed yet, so Windows SmartScreen and
+macOS Gatekeeper ask for confirmation the first time (on macOS: right-click → Open).
+
+To build one yourself: `uv run python packaging/build.py [--with-cloudflared]`, then
+check it with `uv run python packaging/smoke_test.py dist/imagelib/imagelib`.
 
 ## The graphical interface
 
@@ -111,6 +121,16 @@ Plan items for drives connected to an agent are carried out by that agent on its
 sync, after the hub's last-copy check; the agent re-checks each file before moving it.
 Restore and permanent deletion are relayed the same way. If two computers disagree
 about a file, the most recent change wins.
+
+## Organize: a clean library
+
+**Organize** copies one of each picture into a new folder sorted as
+`YEAR/YEAR-MONTH-DAY/name` (EXIF date, or the file date). Duplicates, files marked to
+discard, thumbnails and web exports of pictures being copied, and extra versions of
+similar images are left out; thumbnails whose original is lost are copied. It only
+copies: each file is written under a temporary name, read back and checked, then put
+in place. Pictures on disconnected drives wait; **Continue** picks up where it stopped.
+Command line: `imagelib organize TARGET` and `imagelib organize --resume ID`.
 
 ## Carrying out decisions (Actions)
 

@@ -26,9 +26,9 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import analyze, discover, formats, plans, queries, remote, review, sync, volumes
+from . import analyze, discover, formats, organize, plans, queries, remote, review, sync, volumes
 from .catalog import Catalog
-from .jobs import Busy, OnlineVolumes, PlanManager, RelateManager, ScanManager, SyncManager
+from .jobs import Busy, ExportManager, OnlineVolumes, PlanManager, RelateManager, ScanManager, SyncManager
 from .previews import PreviewStore
 from .search import hash_file
 
@@ -171,6 +171,13 @@ class HubUpdate(BaseModel):
     cf_client_secret: str | None = None
 
 
+class OrganizeRequest(BaseModel):
+    target: str
+    include_videos: bool = True
+    include_raw: bool = True
+    include_damaged: bool = False
+
+
 class HashList(BaseModel):
     hashes: list[str]
 
@@ -191,6 +198,8 @@ def create_app(catalog_dir: Path, workers: int | None = None, auto_relate: bool 
     scans = ScanManager(catalog_dir, online, workers=workers, relate_manager=relater)
     plan_runner = PlanManager(catalog_dir, online, relater)
     plan_runner.scans, scans.plans = scans, plan_runner
+    exporter = ExportManager(catalog_dir, online)
+    exporter.scans, exporter.plans, scans.exports = scans, plan_runner, exporter
     syncer = SyncManager(catalog_dir)
     syncer.scans, syncer.plans, scans.sync = scans, plan_runner, syncer
     access = AccessState(catalog_dir)
@@ -213,6 +222,7 @@ def create_app(catalog_dir: Path, workers: int | None = None, auto_relate: bool 
         syncer.stop()
         relater.stop(wait=False)
         plan_runner.stop()
+        exporter.stop()
         await asyncio.to_thread(scans.shutdown)
 
     app = FastAPI(title="imagelib", lifespan=lifespan)
@@ -703,6 +713,37 @@ def create_app(catalog_dir: Path, workers: int | None = None, auto_relate: bool 
             raise HTTPException(400, f"not a valid bundle: {e}")
         finally:
             path.unlink(missing_ok=True)
+
+    # -- organize ----------------------------------------------------------------
+
+    @app.post("/api/organize")
+    def organize_create(req: OrganizeRequest):
+        c = cat()
+        target = Path(req.target)
+        if not target.is_absolute():
+            raise HTTPException(400, "choose a folder")
+        found = volumes.resolve_path(c, target if target.exists() else target.parent, adopt=False)
+        if found and found[0].read_only:
+            raise HTTPException(400, f"'{found[0].label}' is registered read-only; choose another drive")
+        opts = organize.Options(req.include_videos, req.include_raw, req.include_damaged)
+        return organize.create(c, target, opts)
+
+    @app.get("/api/organize")
+    def organize_list():
+        return organize.list_exports(cat())
+
+    @app.post("/api/organize/{export_id}/run")
+    def organize_run(export_id: int):
+        try:
+            exporter.start(export_id)
+        except Busy as e:
+            raise HTTPException(409, str(e))
+        return exporter.state()
+
+    @app.post("/api/organize/{export_id}/pause")
+    def organize_pause(export_id: int):
+        exporter.stop()
+        return exporter.state()
 
     # -- action plans ------------------------------------------------------------
 

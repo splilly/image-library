@@ -77,8 +77,9 @@ match to a larger image with the same aspect ratio. Outcome per thumbnail:
 6. **Hub/agent sync + remote access (done)** — remote access to the GUI; agents sync
    incrementally over Tailscale/Cloudflare with per-agent tokens, or via bundle files;
    plan actions (move/restore/purge) relayed to the agent that holds the drive.
-7. **Packaging** — PyInstaller builds for all OSes via GitHub Actions; optional
-   Organize/export of unique best originals into a date-based library.
+7. **Packaging (done)** — PyInstaller one-folder builds for all OSes via GitHub Actions
+   with a smoke test of each packaged app; Organize copies the best unique originals
+   into a date-sorted library.
 
 ## Remote access (done, ahead of the rest of milestone 6)
 

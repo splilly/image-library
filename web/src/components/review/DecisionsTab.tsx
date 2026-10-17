@@ -36,9 +36,9 @@ export function DecisionsTab({ summary, onChanged }: { summary: DecisionSummary 
   return (
     <div className="page wide">
       <div className="note">
-        Decisions are only recorded. <strong>Nothing has been deleted or moved.</strong> In a later step they become
-        an action plan that moves discarded files into a quarantine folder on each drive, where they can still be
-        restored.
+        Decisions are only recorded. <strong>Nothing has been deleted or moved.</strong> To carry them out, create an
+        action plan: it moves discarded files into a quarantine folder on each drive, where they can still be restored.{" "}
+        <a href="#/actions">Go to Actions</a>
       </div>
       {summary && (
         <div className="tiles">

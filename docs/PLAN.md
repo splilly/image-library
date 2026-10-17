@@ -72,7 +72,27 @@ match to a larger image with the same aspect ratio. Outcome per thumbnail:
    duplicate-folder pairs, decisions with last-copy protection.
 4. **Near-duplicates + thumbnail detection (done)** — pixel hashes, relate job,
    thumbnail classification (incl. "not certain"), similar-image review.
-5. **Action plan** — quarantine, undo, purge, last-copy protection.
-6. **Hub/agent sync** — LAN sync, bundle export/import, relayed actions.
+5. **Action plan (done)** — quarantine with per-file re-checks at execution time,
+   journaled moves, restore, typed-confirmation purge, lists for read-only drives.
+6. **Hub/agent sync + remote access** — LAN sync, bundle export/import, relayed
+   actions; using the GUI from another device (see below).
 7. **Packaging** — PyInstaller builds for all OSes via GitHub Actions; optional
    Organize/export of unique best originals into a date-based library.
+
+## Remote access (requested; part of milestone 6)
+
+Drive the GUI from another device (phone, laptop elsewhere). The API can browse
+folders, stream photos and move/delete files, so it must never be exposed without
+authentication. Two layers:
+
+* **Transport**, one of:
+  * *Tailscale* (recommended for personal use): devices join a private network;
+    nothing is exposed to the internet; HTTPS via `tailscale serve`.
+  * *Cloudflare Tunnel + Cloudflare Access*: a public HTTPS hostname, but Cloudflare
+    requires the owner's login (Google / one-time email code) before any request
+    reaches the app. The app verifies the `Cf-Access-Jwt-Assertion` header.
+  * Never a bare quick tunnel (`trycloudflare.com`): the URL alone would be enough.
+* **App login** for every request not coming from the local machine (passkey or
+  password, long-lived session cookie, strict SameSite), so a misconfigured tunnel is
+  not the only line of defence. Agents use per-device tokens issued by the hub.
+* Off by default; enabled in settings, which also shows which devices are signed in.

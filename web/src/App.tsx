@@ -1,3 +1,4 @@
+import Actions from "./pages/Actions";
 import Dashboard from "./pages/Dashboard";
 import Drives from "./pages/Drives";
 import Find from "./pages/Find";
@@ -10,6 +11,7 @@ const PAGES = [
   { id: "dashboard", label: "Overview", icon: "home" },
   { id: "library", label: "Library", icon: "grid" },
   { id: "review", label: "Review", icon: "check" },
+  { id: "actions", label: "Actions", icon: "play" },
   { id: "drives", label: "Drives", icon: "drive" },
   { id: "find", label: "Find image", icon: "search" },
 ] as const;
@@ -30,6 +32,11 @@ export default function App() {
             <Icon name={p.icon} /> <span>{p.label}</span>
           </a>
         ))}
+        {scan?.plan?.running && (
+          <a href="#/actions" className="nav-scan" title="An action plan is running">
+            <span className="pulse" /> <span>Moving files to quarantine</span>
+          </a>
+        )}
         {scan?.running && (
           <a href="#/dashboard" className="nav-scan" title="A scan is running">
             <span className="pulse" /> <span>Scanning {active.length > 1 ? `${active.length} drives` : active[0]?.label ?? ""}</span>
@@ -39,6 +46,8 @@ export default function App() {
       <main className="main">
         {route.page === "library" ? (
           <Library params={route.params} />
+        ) : route.page === "actions" ? (
+          <Actions params={route.params} scan={scan} />
         ) : route.page === "review" ? (
           <Review params={route.params} scan={scan} />
         ) : route.page === "drives" ? (

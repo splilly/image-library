@@ -343,3 +343,22 @@ kbd { font: 11px ui-monospace, Menlo, monospace; border: 1px solid var(--border)
 .member.suggested { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 .member .viewer-image { min-height: 180px; }
 .member .viewer-image img { max-height: 280px; }
+
+/* -- actions ------------------------------------------------------------------------------- */
+.plans-layout { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 16px; align-items: start; }
+.plan-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.plan-list button { width: 100%; display: grid; gap: 2px; text-align: left; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); padding: 10px; cursor: pointer; }
+.plan-list button.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.plan-view { display: grid; gap: 12px; min-width: 0; }
+.plan-view .panel { margin: 0; display: grid; gap: 10px; }
+.plan-view .check { white-space: normal; }
+.plan-drives th { text-align: left; font-size: 12px; color: var(--muted); font-weight: 600; padding: 6px; }
+.plan-drives th.num { text-align: right; }
+.plan-drives .tag { margin-left: 6px; }
+.plan-items td { vertical-align: top; }
+.item-quarantined, .item-restored { color: var(--ok); }
+.item-blocked, .item-skipped { background: var(--warn-soft); color: var(--warn); }
+.item-failed { background: var(--bad-soft); color: var(--bad); }
+.item-purged { color: var(--muted); }
+.danger-zone { border-color: var(--bad); }
+@media (max-width: 900px) { .plans-layout { grid-template-columns: 1fr; } }

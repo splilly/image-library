@@ -282,6 +282,47 @@ def cmd_relate(args) -> int:
     return 0 if finished else 2
 
 
+def cmd_plan(args) -> int:
+    from . import plans
+
+    cat = open_catalog(args)
+    online = volumes.locate_online(cat)
+    if args.plan_cmd == "create":
+        p = plans.create(cat)
+        print(f"Created plan {p['id']} with {p['items']:,} files." if p["id"] else "No new discard decisions to plan.")
+        return 0
+    if args.plan_cmd == "list":
+        for p in plans.list_plans(cat):
+            counts = ", ".join(f"{k} {v['files']:,}" for k, v in sorted(p["counts"].items()))
+            print(f"plan {p['id']}  {time.strftime('%Y-%m-%d %H:%M', time.localtime(p['created_at']))}  {counts}")
+        return 0
+    if args.plan_cmd == "run":
+        refs = {r["id"]: volumes.volume_ref(cat, r) for r in cat.list_volumes()}
+        opts = plans.RunOptions(verify_hash=not args.no_verify, require_connected_copy=not args.trust_catalog)
+        prog = plans.run(cat, args.id, online, refs, opts)
+        print(f"Moved {prog.moved:,} files ({human_bytes(prog.moved_bytes)}) to quarantine; "
+              f"{prog.blocked:,} blocked, {prog.skipped:,} skipped, {prog.failed:,} failed. {prog.message}")
+        for v in prog.waiting_volumes:
+            print(f"  waiting for drive '{refs[v].label}' to be connected")
+        return 0 if prog.state == "done" else 2
+    if args.plan_cmd == "restore":
+        r = plans.restore(cat, args.id, online)
+        print(f"Restored {r['restored']:,} files.")
+        for p in r["problems"]:
+            print("  " + p)
+        return 0
+    if args.plan_cmd == "purge":
+        if args.confirm != "delete":
+            print('Purging deletes the quarantined files permanently. Re-run with --confirm delete.')
+            return 1
+        r = plans.purge(cat, args.id, online)
+        print(f"Deleted {r['purged']:,} files ({human_bytes(r['bytes'])}).")
+        for p in r["problems"]:
+            print("  " + p)
+        return 0
+    return 1
+
+
 # -- GUI ------------------------------------------------------------------------
 
 def cmd_serve(args) -> int:
@@ -333,6 +374,24 @@ def build_parser() -> argparse.ArgumentParser:
     scan.set_defaults(func=cmd_scan)
 
     sub.add_parser("status", help="catalog summary").set_defaults(func=cmd_status)
+
+    plan = sub.add_parser("plan", help="carry out discard decisions (quarantine, restore, purge)") \
+        .add_subparsers(dest="plan_cmd", required=True)
+    plan.add_parser("create", help="snapshot current discard decisions into a new plan").set_defaults(func=cmd_plan)
+    plan.add_parser("list", help="list plans").set_defaults(func=cmd_plan)
+    prun = plan.add_parser("run", help="move a plan's files to quarantine on connected drives")
+    prun.add_argument("id", type=int)
+    prun.add_argument("--no-verify", action="store_true", help="skip re-hashing files before moving them")
+    prun.add_argument("--trust-catalog", action="store_true",
+                      help="accept a kept copy on a disconnected drive as proof it still exists")
+    prun.set_defaults(func=cmd_plan)
+    pres = plan.add_parser("restore", help="move a plan's quarantined files back")
+    pres.add_argument("id", type=int)
+    pres.set_defaults(func=cmd_plan)
+    ppur = plan.add_parser("purge", help="permanently delete a plan's quarantined files")
+    ppur.add_argument("id", type=int)
+    ppur.add_argument("--confirm", default="", help='must be "delete"')
+    ppur.set_defaults(func=cmd_plan)
 
     sub.add_parser("relate", help="find thumbnails, resized and near-identical copies (resumable)") \
         .set_defaults(func=cmd_relate)

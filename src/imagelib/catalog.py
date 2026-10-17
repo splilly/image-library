@@ -22,7 +22,7 @@ import unicodedata
 import uuid
 from pathlib import Path
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -194,6 +194,33 @@ _MIGRATIONS = {
     ) WITHOUT ROWID;
     INSERT OR IGNORE INTO meta(key, value) VALUES ('relate_version', '-1'), ('relate_block', '0'),
         ('relate_target', '-1'), ('contents_version', '0');
+    """,
+    6: """
+    -- Action plans: discard decisions turned into moves to quarantine (plans.py).
+    CREATE TABLE plans (
+        id         INTEGER PRIMARY KEY,
+        created_at REAL NOT NULL,
+        machine_id TEXT NOT NULL
+    );
+    CREATE TABLE plan_items (
+        id              INTEGER PRIMARY KEY,
+        plan_id         INTEGER NOT NULL REFERENCES plans(id),
+        file_id         INTEGER NOT NULL REFERENCES files(id),
+        volume_id       TEXT NOT NULL,
+        rel_path        TEXT NOT NULL,
+        rel_path_raw    BLOB,
+        content_hash    BLOB,
+        size            INTEGER NOT NULL,
+        mtime_ns        INTEGER NOT NULL,
+        reason          TEXT NOT NULL,
+        -- pending | moving | quarantined | failed | blocked | skipped | restored | purged
+        status          TEXT NOT NULL,
+        quarantine_path TEXT,                       -- relative to the volume root, '/' separated
+        error           TEXT,
+        updated_at      REAL NOT NULL
+    );
+    CREATE INDEX plan_items_plan ON plan_items(plan_id, volume_id, status);
+    CREATE INDEX plan_items_file ON plan_items(file_id);
     """,
 }
 

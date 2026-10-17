@@ -145,7 +145,13 @@ def summary(cat: Catalog) -> dict:
     stale = cat.conn.execute(
         "SELECT count(*) FROM decisions d JOIN files f ON f.id = d.file_id "
         "WHERE d.content_hash IS NOT f.content_hash").fetchone()[0]
-    out = {"keep": {"files": 0, "bytes": 0}, "discard": {"files": 0, "bytes": 0}, "by_reason": [], "stale": stale}
+    unplanned = cat.conn.execute(
+        f"""SELECT count(*) FROM decisions d JOIN files f ON {VALID_DECISION}
+            WHERE d.decision = 'discard' AND f.state != 'missing' AND NOT EXISTS (
+                SELECT 1 FROM plan_items i WHERE i.file_id = f.id
+                AND i.status IN ('pending', 'moving', 'quarantined', 'failed', 'blocked'))""").fetchone()[0]
+    out = {"keep": {"files": 0, "bytes": 0}, "discard": {"files": 0, "bytes": 0}, "by_reason": [], "stale": stale,
+           "unplanned_discard": unplanned}
     for r in rows:
         out[r["decision"]]["files"] += r["files"]
         out[r["decision"]]["bytes"] += r["bytes"]

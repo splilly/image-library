@@ -21,9 +21,9 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import analyze, discover, formats, queries, review, volumes
+from . import analyze, discover, formats, plans, queries, review, volumes
 from .catalog import Catalog
-from .jobs import OnlineVolumes, RelateManager, ScanManager
+from .jobs import Busy, OnlineVolumes, PlanManager, RelateManager, ScanManager
 from .previews import PreviewStore
 from .search import hash_file
 
@@ -78,6 +78,19 @@ class FolderDiscard(BaseModel):
     discard_folder: str
 
 
+class PlanRun(BaseModel):
+    verify_hash: bool = True
+    require_connected_copy: bool = True
+
+
+class PlanRestore(BaseModel):
+    item_ids: list[int] | None = None
+
+
+class PlanPurge(BaseModel):
+    confirm: str
+
+
 class HashList(BaseModel):
     hashes: list[str]
 
@@ -95,6 +108,8 @@ def create_app(catalog_dir: Path, workers: int | None = None, auto_relate: bool 
     online = OnlineVolumes(catalog_dir)
     relater = RelateManager(catalog_dir)
     scans = ScanManager(catalog_dir, online, workers=workers, relate_manager=relater)
+    plan_runner = PlanManager(catalog_dir, online, relater)
+    plan_runner.scans, scans.plans = scans, plan_runner
     phash_index = queries.PhashIndex()
 
     @asynccontextmanager
@@ -103,6 +118,7 @@ def create_app(catalog_dir: Path, workers: int | None = None, auto_relate: bool 
             relater.start()  # catches up after scans made by the command line; no-op when current
         yield
         relater.stop(wait=False)
+        plan_runner.stop()
         await asyncio.to_thread(scans.shutdown)
 
     app = FastAPI(title="imagelib", lifespan=lifespan)
@@ -194,7 +210,10 @@ def create_app(catalog_dir: Path, workers: int | None = None, auto_relate: bool 
             wanted += [(s["volume_id"], s["root_subpath"]) for s in c.unfinished_scans()]
         if not wanted:
             raise HTTPException(400, "nothing to scan")
-        scans.start(wanted)
+        try:
+            scans.start(wanted)
+        except Busy as e:
+            raise HTTPException(409, str(e))
         return scans.state()
 
     @app.post("/api/scan/pause")
@@ -421,6 +440,62 @@ def create_app(catalog_dir: Path, workers: int | None = None, auto_relate: bool 
             return refused(e)
         except ValueError as e:
             raise HTTPException(400, str(e))
+
+    # -- action plans ------------------------------------------------------------
+
+    @app.post("/api/plans")
+    def create_plan():
+        return plans.create(cat())
+
+    @app.get("/api/plans")
+    def list_plans():
+        return plans.list_plans(cat())
+
+    @app.get("/api/plans/{plan_id}")
+    def plan_detail(plan_id: int):
+        d = plans.detail(cat(), plan_id, online.get())
+        if d is None:
+            raise HTTPException(404, "no such plan")
+        return d
+
+    @app.get("/api/plans/{plan_id}/items")
+    def plan_items(plan_id: int, status: str | None = None, volume: str | None = None, after: int = 0,
+                   limit: int = Query(200, le=1000)):
+        return plans.items(cat(), plan_id, status or None, volume or None, after, limit)
+
+    @app.post("/api/plans/{plan_id}/run")
+    def plan_run(plan_id: int, req: PlanRun):
+        try:
+            plan_runner.start(plan_id, plans.RunOptions(req.verify_hash, req.require_connected_copy))
+        except Busy as e:
+            raise HTTPException(409, str(e))
+        return plan_runner.state()
+
+    @app.post("/api/plans/{plan_id}/pause")
+    def plan_pause(plan_id: int):
+        plan_runner.stop()
+        return plan_runner.state()
+
+    @app.post("/api/plans/{plan_id}/restore")
+    def plan_restore(plan_id: int, req: PlanRestore):
+        if plan_runner.running:
+            raise HTTPException(409, "wait for the running plan to finish")
+        return plans.restore(cat(), plan_id, online.get(force=True), req.item_ids)
+
+    @app.post("/api/plans/{plan_id}/purge")
+    def plan_purge(plan_id: int, req: PlanPurge):
+        if req.confirm != "delete":
+            raise HTTPException(400, 'type "delete" to confirm')
+        if plan_runner.running:
+            raise HTTPException(409, "wait for the running plan to finish")
+        return plans.purge(cat(), plan_id, online.get(force=True))
+
+    @app.get("/api/plans/{plan_id}/manual-list/{volume_id}")
+    def plan_manual_list(plan_id: int, volume_id: str):
+        root = online.get().get(volume_id)
+        text = plans.manual_list(cat(), plan_id, volume_id, str(root) if root else None)
+        return Response(text, media_type="text/plain; charset=utf-8", headers={
+            "Content-Disposition": f'attachment; filename="imagelib-plan-{plan_id}-to-delete.txt"'})
 
     # -- "where is this image?" ------------------------------------------------
 

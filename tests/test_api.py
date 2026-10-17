@@ -270,3 +270,26 @@ def test_relations_run_after_scanning_and_feed_the_review_endpoints(scanned):
     result = api.post("/api/review/thumbnails/discard-verified").json()
     assert result["images"] == 2
     assert api.get("/api/review/similar").json()["total"] == 0  # the sample has no near-duplicates
+
+
+def test_action_plan_endpoints(scanned):
+    api, vid, root, rel = scanned
+    files = {i["path"]: i for i in all_files(api)}
+    api.post("/api/decisions", json={"file_ids": [files[rel["dup1"]]["id"]], "decision": "discard",
+                                     "reason": "duplicate"}).raise_for_status()
+    plan = api.post("/api/plans").json()
+    assert plan["items"] == 1
+    # Not while a scan runs, and vice versa.
+    api.post("/api/plan" + "s/%d/run" % plan["id"], json={}).raise_for_status()
+    deadline = time.monotonic() + 30
+    while api.get("/api/scan").json()["plan"]["running"]:
+        assert time.monotonic() < deadline
+        time.sleep(0.1)
+    state = api.get("/api/scan").json()["plan"]
+    assert state["state"] == "done" and state["moved"] == 1
+    assert not (root / rel["dup1"]).exists()
+    detail = api.get(f"/api/plans/{plan['id']}").json()
+    assert detail["volumes"][0]["counts"]["quarantined"]["files"] == 1
+    assert api.post(f"/api/plans/{plan['id']}/purge", json={"confirm": "yes"}).status_code == 400
+    assert api.post(f"/api/plans/{plan['id']}/restore", json={}).json()["restored"] == 1
+    assert (root / rel["dup1"]).exists()

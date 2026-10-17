@@ -13,6 +13,11 @@ export function bytes(n: number | null | undefined): string {
   return i === 0 ? `${v} B` : `${v.toFixed(v < 10 ? 2 : 1)} ${units[i]}`;
 }
 
+/** "1 file", "3 files" */
+export function plural(n: number, word: string): string {
+  return `${n.toLocaleString()} ${word}${n === 1 ? "" : "s"}`;
+}
+
 export function count(n: number | null | undefined): string {
   return n === null || n === undefined ? "–" : n.toLocaleString();
 }

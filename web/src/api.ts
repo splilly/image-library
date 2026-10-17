@@ -72,6 +72,50 @@ export interface RelateState {
   current: boolean;
 }
 
+export interface PlanProgress {
+  plan_id: number;
+  state: string;
+  total: number;
+  done: number;
+  moved: number;
+  moved_bytes: number;
+  blocked: number;
+  skipped: number;
+  failed: number;
+  current: string;
+  message: string;
+  waiting_volumes: string[];
+  running: boolean;
+}
+
+export type Counts = Record<string, { files: number; bytes: number }>;
+
+export interface PlanSummary {
+  id: number;
+  created_at: number;
+  counts: Counts;
+}
+
+export interface PlanDetail {
+  id: number;
+  created_at: number;
+  volumes: { volume_id: string; label: string; read_only: boolean; online: boolean; counts: Counts }[];
+}
+
+export interface PlanItem {
+  id: number;
+  file_id: number;
+  volume_id: string;
+  volume_label: string;
+  path: string;
+  size: number;
+  reason: string;
+  status: string;
+  error: string | null;
+  quarantine_path: string | null;
+  hash: string | null;
+}
+
 export interface ScanState {
   running: boolean;
   pausing: boolean;
@@ -79,6 +123,7 @@ export interface ScanState {
   notes: string[];
   version: number;
   relate?: RelateState;
+  plan?: PlanProgress | null;
 }
 
 export interface FileItem {
@@ -181,6 +226,7 @@ export interface DecisionSummary {
   discard: { files: number; bytes: number };
   by_reason: { decision: Decision; reason: string; files: number; bytes: number }[];
   stale: number;
+  unplanned_discard: number;
 }
 
 export interface DecisionItem {
@@ -415,6 +461,19 @@ export const api = {
   cluster: (id: number) => request<Cluster>("GET", `/api/review/similar/${id}`),
   keepClusterMember: (id: number, hash: string) =>
     request<{ kept: number; discarded: number }>("POST", `/api/review/similar/${id}/keep/${hash}`),
+  createPlan: () => request<{ id: number | null; items: number }>("POST", "/api/plans"),
+  plans: () => request<PlanSummary[]>("GET", "/api/plans"),
+  plan: (id: number) => request<PlanDetail>("GET", `/api/plans/${id}`),
+  planItems: (id: number, status?: string, after = 0) =>
+    request<{ items: PlanItem[]; next: number | null }>("GET", `/api/plans/${id}/items${qs({ status, after })}`),
+  runPlan: (id: number, opts: { verify_hash: boolean; require_connected_copy: boolean }) =>
+    request<PlanProgress>("POST", `/api/plans/${id}/run`, opts),
+  pausePlan: (id: number) => request<PlanProgress>("POST", `/api/plans/${id}/pause`),
+  restorePlan: (id: number, item_ids?: number[]) =>
+    request<{ restored: number; problems: string[] }>("POST", `/api/plans/${id}/restore`, { item_ids: item_ids ?? null }),
+  purgePlan: (id: number, confirm: string) =>
+    request<{ purged: number; bytes: number; problems: string[] }>("POST", `/api/plans/${id}/purge`, { confirm }),
+  manualListUrl: (id: number, volume: string) => `/api/plans/${id}/manual-list/${volume}`,
   folderPairs: (volume?: string, offset = 0) =>
     request<{ items: FolderPair[]; total: number }>("GET", `/api/review/folder-pairs${qs({ volume, offset })}`),
   discardFolderCopies: (keep: FolderSide, discard: FolderSide) =>

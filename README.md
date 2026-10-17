@@ -22,11 +22,10 @@ design and roadmap (GUI, thumbnail review, quarantine, multi-machine hub).
 
 ## Status
 
-Milestones 1–4 of 7: the catalog and scanning engine, a command line interface, the
+Milestones 1–5 of 7: the catalog and scanning engine, a command line interface, the
 graphical interface (overview with live scan progress, drives, library browser, "find
-this image"), review screens for problem files and duplicates, and detection of
-thumbnails, reduced copies and near-identical images. Decisions are recorded only;
-carrying them out (quarantine, undo) is milestone 5.
+this image"), review screens for problem files, duplicates, thumbnails and
+near-identical images, and action plans that carry out decisions safely.
 
 ## The graphical interface
 
@@ -73,6 +72,19 @@ uv run imagelib gui                                # opens http://127.0.0.1:8765
 
 The server only listens on 127.0.0.1 and refuses requests from other sites. For GUI
 development run `uv run imagelib gui --no-browser` and `npm run dev` in `web/`.
+
+## Carrying out decisions (Actions)
+
+Decisions change nothing on disk by themselves. An **action plan** snapshots the files
+marked to discard and, for each one on a connected drive, checks again at that moment
+that the decision stands, the file is unchanged (size, date and, by default, contents)
+and that a kept copy or intact version of the picture still exists — by default on a
+connected drive, where it is looked up. Then the file is renamed into
+`_imagelib_quarantine/plan-N/<original path>` on the same drive: instant, and undone
+with **Restore**. **Delete permanently** (typing `delete` to confirm) is the only step
+that removes data. Drives registered read-only are never written to; you can download
+a list of their files to delete yourself. From the command line:
+`imagelib plan create | list | run N | restore N | purge N --confirm delete`.
 
 ## Usage (development)
 

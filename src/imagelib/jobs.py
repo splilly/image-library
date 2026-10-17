@@ -12,7 +12,7 @@ import time
 from dataclasses import fields
 from pathlib import Path
 
-from . import relate, volumes
+from . import plans, relate, volumes
 from .catalog import Catalog
 from .previews import PreviewStore
 from .scanner import Scanner, TargetProgress
@@ -97,11 +97,70 @@ class RelateManager:
         return {**vars(p), "running": self._thread is not None, "current": current}
 
 
+class Busy(Exception):
+    pass
+
+
+class PlanManager:
+    """Runs one action plan at a time in the background (never alongside a scan)."""
+
+    def __init__(self, catalog_dir: Path, online: OnlineVolumes, relate_manager: RelateManager):
+        self.catalog_dir = catalog_dir
+        self.online = online
+        self.relate = relate_manager
+        self.scans: ScanManager | None = None
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
+        self.progress: plans.RunProgress | None = None
+
+    @property
+    def running(self) -> bool:
+        return self._thread is not None
+
+    def start(self, plan_id: int, options: plans.RunOptions) -> None:
+        with self._lock:
+            if self._thread is not None:
+                raise Busy("an action plan is already running")
+            if self.scans and self.scans.running:
+                raise Busy("a scan is running; pause it or wait for it to finish")
+            self._stop.clear()
+            self.progress = plans.RunProgress(plan_id, state="starting")
+            self._thread = threading.Thread(target=self._run, args=(plan_id, options), name="plan", daemon=True)
+            self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def _run(self, plan_id: int, options: plans.RunOptions) -> None:
+        try:
+            self.relate.stop(wait=True)
+            cat = Catalog.shared(self.catalog_dir)
+            online = self.online.get(force=True)
+            refs = {r["id"]: volumes.volume_ref(cat, r) for r in cat.list_volumes()}
+
+            def on_progress(p: plans.RunProgress) -> None:
+                self.progress = plans.RunProgress(**{**vars(p), "waiting_volumes": list(p.waiting_volumes)})
+
+            plans.run(cat, plan_id, online, refs, options, self._stop.is_set, on_progress)
+        except Exception as e:
+            self.progress = plans.RunProgress(plan_id, state="failed", message=f"{type(e).__name__}: {e}")
+        finally:
+            with self._lock:
+                self._thread = None
+            self.relate.start()
+
+    def state(self) -> dict | None:
+        p = self.progress
+        return None if p is None else {**vars(p), "running": self.running}
+
+
 class ScanManager:
     def __init__(self, catalog_dir: Path, online: OnlineVolumes, workers: int | None = None,
                  relate_manager: RelateManager | None = None):
         self.catalog_dir = catalog_dir
         self.relate = relate_manager  # paused while scanning, run when scanning ends
+        self.plans: PlanManager | None = None
         self.online = online
         self.workers = workers
         self._lock = threading.Lock()
@@ -116,6 +175,8 @@ class ScanManager:
     # -- control -----------------------------------------------------------
 
     def start(self, requests: list[tuple[str, str]]) -> None:
+        if self.plans and self.plans.running:
+            raise Busy("an action plan is running; wait for it to finish or pause it")
         with self._lock:
             for req in requests:
                 self._wanted[req] = None
@@ -156,6 +217,8 @@ class ScanManager:
                  "targets": live or self.last, "notes": list(self.notes), "version": self.version}
         if self.relate:
             state["relate"] = self.relate.state()
+        if self.plans:
+            state["plan"] = self.plans.state()
         return state
 
     # -- runner ------------------------------------------------------------

@@ -25,6 +25,17 @@ CREATE TABLE IF NOT EXISTS previews (
 
 
 class PreviewStore:
+    _shared: dict[Path, "PreviewStore"] = {}
+    _shared_lock = threading.Lock()
+
+    @classmethod
+    def shared(cls, path: Path) -> "PreviewStore":
+        key = Path(path).resolve()
+        with cls._shared_lock:
+            if key not in cls._shared:
+                cls._shared[key] = cls(key)
+            return cls._shared[key]
+
     def __init__(self, path: Path):
         self.path = Path(path)
         self._local = threading.local()

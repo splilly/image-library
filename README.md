@@ -22,8 +22,30 @@ design and roadmap (GUI, thumbnail review, quarantine, multi-machine hub).
 
 ## Status
 
-Milestone 1 of 7: the catalog and scanning engine, with a command line interface.
-The graphical interface is milestone 2.
+Milestones 1–2 of 7: the catalog and scanning engine, a command line interface, and
+the graphical interface (overview with live scan progress, drives, library browser,
+"find this image").
+
+## The graphical interface
+
+```sh
+cd web && npm install && npm run build && cd ..   # once, and after changing the GUI
+uv run imagelib gui                                # opens http://127.0.0.1:8765/
+```
+
+* **Overview**: totals, live per-drive progress (speed, ETA, problems found), pause
+  and resume, unfinished scans waiting for their drive.
+* **Drives**: add a drive (with or without writing an ID file), scan it or one folder,
+  rename it, see which drives are connected and where.
+* **Library**: every file on every drive, connected or not, as a thumbnail grid that
+  stays fast at millions of files. Filter by drive and folder, problems, duplicates,
+  type, camera and year; the detail panel shows what is wrong with a file, every copy
+  and its drive (with the path ready to copy), and look-alike images. Arrow keys step
+  through results.
+* **Find image**: drop any photo to see which drives hold it or something like it.
+
+The server only listens on 127.0.0.1 and refuses requests from other sites. For GUI
+development run `uv run imagelib gui --no-browser` and `npm run dev` in `web/`.
 
 ## Usage (development)
 

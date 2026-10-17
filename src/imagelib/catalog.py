@@ -22,7 +22,7 @@ import unicodedata
 import uuid
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -123,6 +123,11 @@ _MIGRATIONS = {
     );
     CREATE INDEX volume_fingerprints_volume ON volume_fingerprints(volume_id);
     """,
+    3: """
+    -- Library browsing: sort by date, filter by camera.
+    CREATE INDEX contents_taken ON contents(taken_at);
+    CREATE INDEX contents_camera ON contents(camera_model);
+    """,
 }
 
 
@@ -144,6 +149,18 @@ def to_unsigned64(v: int | None) -> int | None:
 
 class Catalog:
     """Owns the catalog directory: ``catalog.db`` plus ``previews.db``."""
+
+    _shared: dict[Path, "Catalog"] = {}
+    _shared_lock = threading.Lock()
+
+    @classmethod
+    def shared(cls, directory: Path) -> "Catalog":
+        """One instance per directory for long-lived processes (connections stay per thread)."""
+        key = Path(directory).resolve()
+        with cls._shared_lock:
+            if key not in cls._shared:
+                cls._shared[key] = cls(key)
+            return cls._shared[key]
 
     def __init__(self, directory: Path):
         self.dir = Path(directory)

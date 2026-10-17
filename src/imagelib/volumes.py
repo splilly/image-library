@@ -187,11 +187,17 @@ def register_read_only(catalog, path: Path, label: str | None) -> VolumeRef:
     return volume_ref(catalog, catalog.get_volume(volume_id))
 
 
-def resolve_path(catalog, path: Path) -> tuple[VolumeRef, Path] | None:
-    """The catalogued volume containing ``path`` and its current root, if any."""
+def resolve_path(catalog, path: Path, adopt: bool = True) -> tuple[VolumeRef, Path] | None:
+    """The catalogued volume containing ``path`` and its current root, if any.
+
+    A drive whose marker came from another catalog (another machine) is added to this
+    one when ``adopt`` is true; read-only callers pass False to stay side-effect free.
+    """
     marker = find_volume_root(path)
     if marker:
         row = catalog.get_volume(marker.id)
+        if row is None and not adopt:
+            return None
         if row is None:  # registered by another machine's catalog
             catalog.upsert_volume(marker.id, marker.label, None, total_bytes(marker.root))
             row = catalog.get_volume(marker.id)

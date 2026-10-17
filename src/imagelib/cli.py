@@ -259,6 +259,28 @@ def cmd_where(args) -> int:
     return 0
 
 
+# -- GUI ------------------------------------------------------------------------
+
+def cmd_serve(args) -> int:
+    import threading
+    import webbrowser
+
+    import uvicorn
+
+    from .server import create_app
+
+    cat = open_catalog(args)
+    app = create_app(cat.dir, workers=args.workers)
+    url = f"http://127.0.0.1:{args.port}/"
+    print(f"imagelib GUI: {url}   (catalog: {cat.dir})")
+    print("Press Ctrl+C to stop; a running scan is paused and resumes next time.")
+    if not args.no_browser:
+        threading.Timer(1.0, lambda: webbrowser.open(url)).start()
+    # 127.0.0.1 only: the API can read your drives, so it must not be reachable from the network.
+    uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
+    return 0
+
+
 # -- entry point ---------------------------------------------------------------
 
 def build_parser() -> argparse.ArgumentParser:
@@ -286,6 +308,12 @@ def build_parser() -> argparse.ArgumentParser:
     scan.set_defaults(func=cmd_scan)
 
     sub.add_parser("status", help="catalog summary").set_defaults(func=cmd_status)
+
+    serve = sub.add_parser("gui", aliases=["serve"], help="open the graphical interface in your browser")
+    serve.add_argument("--port", type=int, default=8765)
+    serve.add_argument("--no-browser", action="store_true", help="don't open a browser window")
+    serve.add_argument("--workers", type=int, help="analysis processes for scans (default: automatic)")
+    serve.set_defaults(func=cmd_serve)
 
     prob = sub.add_parser("problems", help="list corrupt or suspicious files")
     prob.add_argument("--status", choices=("corrupt", "warning", "unsupported", "all"), default="all")

@@ -22,7 +22,7 @@ import unicodedata
 import uuid
 from pathlib import Path
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -161,12 +161,48 @@ _MIGRATIONS = {
     -- File name (lower-cased, without folders): find the same photo under another path.
     CREATE INDEX files_name ON files(lower(substr(rel_path, length(rtrim(rel_path, replace(rel_path, '/', ''))) + 1)));
     """,
+    5: """
+    -- Same decoded picture, whatever the metadata (see analyze._pixel_hash).
+    ALTER TABLE contents ADD COLUMN pixel_hash BLOB;
+    CREATE INDEX contents_pixel_hash ON contents(pixel_hash);
+
+    -- Relations between different contents, found by the relate job (relate.py).
+    --   same_pixels: identical picture, different bytes (a < b)
+    --   near:        same size, visually the same: re-encoded or lightly edited (a < b)
+    --   derived:     a is a smaller version of b (thumbnail, web export)
+    --   derived_uncertain: a looks like a smaller version of b but failed the pixel check
+    --                (often a burst neighbour of the true original); shown, never relied on
+    CREATE TABLE similar_pairs (
+        a          BLOB NOT NULL,
+        b          BLOB NOT NULL,
+        kind       TEXT NOT NULL,
+        phash_dist INTEGER NOT NULL,
+        scale      REAL NOT NULL,                    -- b's long edge / a's long edge
+        PRIMARY KEY (a, b)
+    ) WITHOUT ROWID;
+    CREATE INDEX similar_pairs_b ON similar_pairs(b);
+    -- Clusters of same_pixels / near pairs (connected components), for review.
+    CREATE TABLE similar_clusters (
+        cluster INTEGER NOT NULL,
+        hash    BLOB NOT NULL PRIMARY KEY
+    );
+    CREATE INDEX similar_clusters_cluster ON similar_clusters(cluster);
+    -- Contents that look like generated thumbnails (by size or by path).
+    CREATE TABLE thumb_candidates (
+        hash   BLOB PRIMARY KEY,
+        reason TEXT NOT NULL
+    ) WITHOUT ROWID;
+    INSERT OR IGNORE INTO meta(key, value) VALUES ('relate_version', '-1'), ('relate_block', '0'),
+        ('relate_target', '-1'), ('contents_version', '0');
+    """,
 }
 
 
-def bump_files_version(conn: sqlite3.Connection) -> None:
-    """Mark derived data (duplicate groups) stale. Call once per batch that changes files."""
-    conn.execute("UPDATE meta SET value = CAST(value AS INTEGER) + 1 WHERE key = 'files_version'")
+def bump_files_version(conn: sqlite3.Connection, contents: bool = False) -> None:
+    """Mark derived data stale. Call once per batch that changes files; ``contents`` also
+    when analysis results were written (relations depend only on those)."""
+    conn.execute("UPDATE meta SET value = CAST(value AS INTEGER) + 1 WHERE key = 'files_version'"
+                 + (" OR key = 'contents_version'" if contents else ""))
 
 
 # Must match the files_name index expression exactly for SQLite to use the index.

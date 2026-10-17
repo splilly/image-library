@@ -522,12 +522,12 @@ class Scanner:
         self._write(
             "INSERT OR REPLACE INTO contents(hash, size, kind, format, width, height, status, problems, "
             "taken_at, camera_make, camera_model, software, orientation, has_exif, duration_s, phash, dhash, "
-            "has_preview, metadata_json, analyzer_version, analyzed_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "pixel_hash, has_preview, metadata_json, analyzer_version, analyzed_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (h, entry.job.size, entry.job.kind, r.format, r.width, r.height, r.status,
              "; ".join(r.problems) or None, r.taken_at, r.camera_make, r.camera_model, r.software,
              r.orientation, int(r.has_exif), r.duration_s, to_signed64(r.phash), to_signed64(r.dhash),
-             int(bool(r.previews)), r.metadata_json(), analyze.ANALYZER_VERSION, time.time()))
+             r.pixel_hash, int(bool(r.previews)), r.metadata_json(), analyze.ANALYZER_VERSION, time.time()))
         self._known.add(h)
         for i, msg in enumerate(entry.waiters):
             prog = self.progress[msg.target.scan_id]
@@ -574,7 +574,8 @@ class Scanner:
         self._pending_previews = []
         conn = self.catalog.conn
         conn.execute("BEGIN IMMEDIATE")
-        bump_files_version(conn)
+        bump_files_version(conn, contents=any(sql.startswith("INSERT OR REPLACE INTO contents")
+                                              for sql, _ in self._pending_writes))
         for sql, args in self._pending_writes:
             conn.execute(sql, args)
             if self._crash_after is not None and sql.startswith("UPDATE files"):

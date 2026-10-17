@@ -22,10 +22,11 @@ design and roadmap (GUI, thumbnail review, quarantine, multi-machine hub).
 
 ## Status
 
-Milestones 1–3 of 7: the catalog and scanning engine, a command line interface, the
+Milestones 1–4 of 7: the catalog and scanning engine, a command line interface, the
 graphical interface (overview with live scan progress, drives, library browser, "find
-this image") and the review screens for problem files and duplicates. Decisions are
-recorded only; carrying them out (quarantine, undo) is milestone 5.
+this image"), review screens for problem files and duplicates, and detection of
+thumbnails, reduced copies and near-identical images. Decisions are recorded only;
+carrying them out (quarantine, undo) is milestone 5.
 
 ## The graphical interface
 
@@ -53,10 +54,22 @@ uv run imagelib gui                                # opens http://127.0.0.1:8765
     copy, or accept the suggestions for a whole page of groups at once.
   * *Duplicate folders*: folders that share identical files (backups, re-imports);
     keep one side and mark the other side's copies in one step.
+  * *Thumbnails*: thumbnails and reduced copies (web exports) next to their original,
+    classified as *original found* (safe to discard, in bulk if you like), *original
+    damaged*, *possible original — not certain*, or *no original — only copy* (never
+    suggested for discarding).
+  * *Similar images*: the same picture saved with different metadata, and
+    near-identical re-encodes, with a suggested keeper (most pixels, then most metadata).
   * *Decisions*: what is marked, by reason and size, with undo.
 
-  Discarding every copy of an image that is not corrupt is refused. A decision only
-  applies to the content it was made on: if the file changes, it comes back for review.
+  Discarding every copy of an image that is not corrupt is refused, unless another
+  intact version of the picture is kept (its original, or a same-pixels / near twin).
+  A decision only applies to the content it was made on: if the file changes, it comes
+  back for review.
+
+  Relations between images are found after each scan (`imagelib relate` from the
+  command line; resumable). Burst shots are deliberately not treated as copies: a
+  candidate must match block by block, not just look alike.
 
 The server only listens on 127.0.0.1 and refuses requests from other sites. For GUI
 development run `uv run imagelib gui --no-browser` and `npm run dev` in `web/`.

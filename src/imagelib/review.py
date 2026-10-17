@@ -5,9 +5,11 @@ Decisions only record intent; nothing on disk changes until an action plan is ru
 
 * A decision is tied to the content it was made on. If the file changes, the old
   decision silently stops applying and the file needs review again.
-* Discarding the last copy of an intact image is refused. Only content judged
-  corrupt (or unreadable files) may lose every copy, because that is the purpose
-  of reviewing it.
+* Discarding the last copy of an intact image is refused, unless another version of
+  the same picture survives: its original (for a thumbnail or web export), or a
+  twin with the same pixels or a near-identical re-encode. An original is never
+  discardable because a thumbnail of it exists. Content judged corrupt (or files
+  that cannot be read) may lose every copy: reviewing those is the point.
 """
 
 from __future__ import annotations
@@ -23,10 +25,30 @@ from .queries import PhashIndex, contents_brief
 
 KEEP = "keep"
 DISCARD = "discard"
-REASONS = ("problem", "duplicate", "folder", "manual")
+REASONS = ("problem", "duplicate", "folder", "thumbnail", "similar", "manual")
 
 # A decision applies only while the file still holds the content it was made on.
 VALID_DECISION = "d.file_id = f.id AND d.content_hash IS f.content_hash"
+
+
+def survives(h: str) -> str:
+    """SQL: content ``h`` has a copy that is present and not marked to discard."""
+    return (f"EXISTS (SELECT 1 FROM files sf WHERE sf.content_hash = {h} AND sf.state != 'missing' "
+            f"AND NOT EXISTS (SELECT 1 FROM decisions sd WHERE sd.file_id = sf.id "
+            f"AND sd.content_hash IS sf.content_hash AND sd.decision = 'discard'))")
+
+
+# Another intact version of the picture in ``x.hash`` survives: a larger original it was
+# derived from, or a same-pixels / near twin (directly paired or in the same cluster).
+_OTHER_VERSION_SURVIVES = f"""(
+    EXISTS (SELECT 1 FROM similar_pairs p JOIN contents o ON o.hash = p.b
+            WHERE p.a = x.hash AND p.kind IN ('derived', 'near', 'same_pixels')
+            AND o.status = 'ok' AND {survives('o.hash')})
+    OR EXISTS (SELECT 1 FROM similar_pairs p JOIN contents o ON o.hash = p.a
+               WHERE p.b = x.hash AND p.kind IN ('near', 'same_pixels') AND o.status = 'ok' AND {survives('o.hash')})
+    OR EXISTS (SELECT 1 FROM similar_clusters m JOIN similar_clusters o2 ON o2.cluster = m.cluster
+               JOIN contents o ON o.hash = o2.hash
+               WHERE m.hash = x.hash AND o.hash != x.hash AND o.status = 'ok' AND {survives('o.hash')}))"""
 
 FOLDER_PAIR_MAX_COPIES = 50
 
@@ -94,10 +116,11 @@ def _check_last_copies(conn: sqlite3.Connection, hashes: set[bytes]) -> None:
     for i in range(0, len(hashes_list), 400):
         chunk = hashes_list[i:i + 400]
         offenders += conn.execute(
-            f"""SELECT c.hash, c.status, count(f.id) AS copies FROM contents c
-                JOIN files f ON f.content_hash = c.hash AND f.state != 'missing'
-                WHERE c.hash IN ({','.join('?' * len(chunk))}) AND c.status != 'corrupt'
-                GROUP BY c.hash
+            f"""SELECT x.hash, x.status, count(f.id) AS copies FROM contents x
+                JOIN files f ON f.content_hash = x.hash AND f.state != 'missing'
+                WHERE x.hash IN ({','.join('?' * len(chunk))}) AND x.status != 'corrupt'
+                AND NOT {_OTHER_VERSION_SURVIVES}
+                GROUP BY x.hash
                 HAVING sum(CASE WHEN EXISTS (SELECT 1 FROM decisions d WHERE {VALID_DECISION}
                                              AND d.decision = 'discard') THEN 0 ELSE 1 END) = 0""",
             chunk).fetchall()
@@ -480,3 +503,187 @@ def _top_difference(a: bytes | None, b: bytes | None, fraction: float = 0.4) -> 
         return None
     rows = max(1, int(64 * fraction))
     return float(np.abs(pa[:rows] - pb[:rows]).mean())
+
+
+# -- thumbnails & reduced copies ----------------------------------------------------------
+
+THUMB_CLASSES = ("original_ok", "original_damaged", "original_uncertain", "orphan")
+
+_THUMB_ROWS = f"""
+SELECT c.hash, c.width, c.height, c.size, c.has_preview, c.taken_at, t.reason AS thumb_reason,
+       (SELECT p.b FROM similar_pairs p JOIN contents o ON o.hash = p.b
+        WHERE p.a = c.hash AND p.kind = 'derived' AND o.status = 'ok' AND {survives('o.hash')}
+        ORDER BY o.width * o.height DESC LIMIT 1) AS original,
+       EXISTS (SELECT 1 FROM similar_pairs p WHERE p.a = c.hash AND p.kind = 'derived') AS has_derived,
+       EXISTS (SELECT 1 FROM similar_pairs p WHERE p.a = c.hash AND p.kind = 'derived_uncertain') AS has_uncertain,
+       EXISTS (SELECT 1 FROM files f JOIN decisions d ON {VALID_DECISION} WHERE f.content_hash = c.hash) AS decided
+FROM contents c LEFT JOIN thumb_candidates t ON t.hash = c.hash
+WHERE (t.hash IS NOT NULL OR EXISTS (SELECT 1 FROM similar_pairs p WHERE p.a = c.hash
+                                     AND p.kind IN ('derived', 'derived_uncertain')))
+  AND EXISTS (SELECT 1 FROM files f WHERE f.content_hash = c.hash AND f.state != 'missing')
+"""
+
+_THUMB_CLASSIFIED = f"""
+SELECT *, CASE WHEN original IS NOT NULL THEN 'original_ok'
+               WHEN has_derived THEN 'original_damaged'
+               WHEN has_uncertain THEN 'original_uncertain' ELSE 'orphan' END AS class,
+          CASE WHEN thumb_reason IS NOT NULL THEN 'thumbnail' ELSE 'reduced' END AS kind
+FROM ({_THUMB_ROWS})
+"""
+
+
+def _thumb_filter(cls: str | None, kind: str | None, undecided: bool) -> tuple[str, list]:
+    where, args = ["1"], []
+    if cls:
+        where.append("class = ?")
+        args.append(cls)
+    if kind:
+        where.append("kind = ?")
+        args.append(kind)
+    if undecided:
+        where.append("NOT decided")
+    return " AND ".join(where), args
+
+
+def thumbnails(cat: Catalog, cls: str | None = None, kind: str | None = None, undecided: bool = False,
+               offset: int = 0, limit: int = 100) -> dict:
+    """Thumbnail-like and reduced-size images, classified by whether their original survives."""
+    where, args = _thumb_filter(cls, kind, undecided)
+    rows = cat.conn.execute(f"SELECT * FROM ({_THUMB_CLASSIFIED}) WHERE {where} "
+                            f"ORDER BY class, kind DESC, hash LIMIT ? OFFSET ?", args + [limit, offset]).fetchall()
+    counts = {f"{r[0]}/{r[1]}": r[2] for r in cat.conn.execute(
+        f"SELECT class, kind, count(*) FROM ({_THUMB_CLASSIFIED}) WHERE {'NOT decided' if undecided else '1'} "
+        f"GROUP BY class, kind")}
+    originals = contents_brief(cat, [r["original"] for r in rows if r["original"]])
+    items = []
+    for r in rows:
+        items.append({
+            "hash": r["hash"].hex(), "width": r["width"], "height": r["height"], "size": r["size"],
+            "has_preview": bool(r["has_preview"]), "class": r["class"], "kind": r["kind"],
+            "reason": r["thumb_reason"], "decided": bool(r["decided"]),
+            "original": originals.get(r["original"]) if r["original"] else None,
+        })
+    return {"items": items, "counts": counts}
+
+
+def _locations(cat: Catalog, content_hash: bytes, online: set[str]) -> list[dict]:
+    rows = cat.conn.execute(
+        "SELECT f.id, f.volume_id, v.label, f.rel_path FROM files f JOIN volumes v ON v.id = f.volume_id "
+        "WHERE f.content_hash = ? AND f.state != 'missing' ORDER BY v.label, f.rel_path", (content_hash,)).fetchall()
+    decisions = file_decisions(cat, [r[0] for r in rows])
+    return [{"file_id": r[0], "volume_id": r[1], "volume_label": r[2], "path": r[3], "online": r[1] in online,
+             "decision": decisions.get(r[0])} for r in rows]
+
+
+def thumbnail_detail(cat: Catalog, content_hash: bytes, online: set[str]) -> dict | None:
+    row = cat.conn.execute(f"SELECT * FROM ({_THUMB_CLASSIFIED}) WHERE hash = ?", (content_hash,)).fetchone()
+    if row is None:
+        return None
+    rows = cat.conn.execute(
+        "SELECT p.b, p.kind FROM similar_pairs p JOIN contents o ON o.hash = p.b "
+        "WHERE p.a = ? AND p.kind IN ('derived', 'derived_uncertain') "
+        "ORDER BY p.kind = 'derived' DESC, o.status = 'ok' DESC, o.width * o.height DESC LIMIT 5",
+        (content_hash,)).fetchall()
+    originals = [r[0] for r in rows]
+    certain = {r[0]: r[1] == "derived" for r in rows}
+    briefs = contents_brief(cat, originals)
+    return {
+        "hash": content_hash.hex(), "width": row["width"], "height": row["height"], "size": row["size"],
+        "has_preview": bool(row["has_preview"]), "class": row["class"], "kind": row["kind"],
+        "reason": row["thumb_reason"], "locations": _locations(cat, content_hash, online),
+        "originals": [{**briefs[h], "certain": certain[h], "locations": _locations(cat, h, online)}
+                      for h in originals if h in briefs],
+    }
+
+
+def discard_verified_thumbnails(cat: Catalog, kind: str | None = "thumbnail") -> dict:
+    """Discard every undecided thumbnail (or reduced copy) whose original is intact and kept."""
+    where, args = _thumb_filter("original_ok", kind, True)
+    hashes = [r[0] for r in cat.conn.execute(f"SELECT hash FROM ({_THUMB_CLASSIFIED}) WHERE {where}", args)]
+    ids = []
+    for i in range(0, len(hashes), 500):
+        chunk = hashes[i:i + 500]
+        ids += [r[0] for r in cat.conn.execute(
+            f"SELECT id FROM files WHERE state != 'missing' AND content_hash IN ({','.join('?' * len(chunk))})",
+            chunk)]
+    decide(cat, ids, DISCARD, "thumbnail")
+    return {"images": len(hashes), "files": len(ids)}
+
+
+# -- similar images (same pixels / near duplicates) ---------------------------------------------
+
+def _cluster_members(cat: Catalog, cluster: int) -> list[sqlite3.Row]:
+    return cat.conn.execute(
+        """SELECT c.hash, c.width, c.height, c.size, c.format, c.status, c.taken_at, c.has_preview, c.has_exif,
+                  c.camera_model, c.software, length(coalesce(c.metadata_json, '')) AS meta_len,
+                  (SELECT min(f.mtime_ns) FROM files f WHERE f.content_hash = c.hash AND f.state != 'missing') AS mtime,
+                  (SELECT count(*) FROM files f WHERE f.content_hash = c.hash AND f.state != 'missing') AS copies
+           FROM similar_clusters m JOIN contents c ON c.hash = m.hash WHERE m.cluster = ?""", (cluster,)).fetchall()
+
+
+def suggest_member(members: list) -> tuple[bytes, str]:
+    """Most pixels, then the most metadata, then the biggest file (least compressed), then the oldest."""
+    best = max(members, key=lambda m: (m["status"] == "ok", (m["width"] or 0) * (m["height"] or 0),
+                                       m["meta_len"], m["size"], -(m["mtime"] or 0)))
+    pixels = {(m["width"], m["height"]) for m in members}
+    if len(pixels) > 1:
+        why = "highest resolution"
+    elif len({m["meta_len"] for m in members}) > 1 and best["meta_len"] == max(m["meta_len"] for m in members):
+        why = "keeps the most metadata (camera, date, tags)"
+    else:
+        why = "largest file (least compressed)"
+    return best["hash"], why
+
+
+def similar_clusters(cat: Catalog, undecided: bool = False, offset: int = 0, limit: int = 100) -> dict:
+    where = "1"
+    if undecided:
+        where = (f"NOT EXISTS (SELECT 1 FROM similar_clusters m2 JOIN files f ON f.content_hash = m2.hash "
+                 f"JOIN decisions d ON {VALID_DECISION} WHERE m2.cluster = g.cluster)")
+    sql = f"""SELECT g.cluster, count(*) AS members, sum(c.size) AS bytes, max(c.size) AS biggest,
+                     min(c.hash) AS sample,
+                     max(EXISTS (SELECT 1 FROM similar_pairs p WHERE (p.a = c.hash OR p.b = c.hash)
+                                 AND p.kind = 'near')) AS has_near
+              FROM similar_clusters g JOIN contents c ON c.hash = g.hash
+              WHERE {where} GROUP BY g.cluster"""
+    total = cat.conn.execute(f"SELECT count(*), coalesce(sum(bytes - biggest), 0) FROM ({sql})").fetchone()
+    rows = cat.conn.execute(f"SELECT * FROM ({sql}) ORDER BY bytes - biggest DESC, cluster LIMIT ? OFFSET ?",
+                            (limit, offset)).fetchall()
+    briefs = contents_brief(cat, [r["sample"] for r in rows])
+    items = [{"cluster": r["cluster"], "members": r["members"], "extra_bytes": r["bytes"] - r["biggest"],
+              "kind": "near" if r["has_near"] else "same_pixels", "sample": briefs.get(r["sample"])}
+             for r in rows]
+    return {"items": items, "total": total[0], "total_extra": total[1]}
+
+
+def similar_cluster(cat: Catalog, cluster: int, online: set[str]) -> dict:
+    members = _cluster_members(cat, cluster)
+    if not members:
+        return {"cluster": cluster, "members": []}
+    keep, why = suggest_member(members)
+    return {
+        "cluster": cluster, "suggested_keep": keep.hex(), "suggestion_reason": why,
+        "members": [{"hash": m["hash"].hex(), "width": m["width"], "height": m["height"], "size": m["size"],
+                     "format": m["format"], "status": m["status"], "taken_at": m["taken_at"],
+                     "has_preview": bool(m["has_preview"]), "has_exif": bool(m["has_exif"]),
+                     "camera": m["camera_model"], "software": m["software"], "metadata_size": m["meta_len"],
+                     "locations": _locations(cat, m["hash"], online)}
+                    for m in sorted(members, key=lambda m: m["hash"] != keep)],
+    }
+
+
+def keep_cluster_member(cat: Catalog, cluster: int, keep_hash: bytes) -> dict:
+    """Keep every copy of one member; discard every copy of the others."""
+    members = [m["hash"] for m in _cluster_members(cat, cluster)]
+    if keep_hash not in members:
+        raise ValueError("that image is not in this group")
+
+    def copies(hashes: list[bytes]) -> list[int]:
+        return [r[0] for h in hashes for r in cat.conn.execute(
+            "SELECT id FROM files WHERE content_hash = ? AND state != 'missing'", (h,))]
+
+    keep_ids = copies([keep_hash])
+    discard_ids = copies([h for h in members if h != keep_hash])
+    decide(cat, keep_ids, KEEP, "similar")
+    decide(cat, discard_ids, DISCARD, "similar")
+    return {"kept": len(keep_ids), "discarded": len(discard_ids)}

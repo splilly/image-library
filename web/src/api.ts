@@ -61,12 +61,24 @@ export interface TargetProgress {
   eta_s: number | null;
 }
 
+export interface RelateState {
+  state: string;
+  phase: string;
+  done: number;
+  total: number;
+  pairs: number;
+  message: string;
+  running: boolean;
+  current: boolean;
+}
+
 export interface ScanState {
   running: boolean;
   pausing: boolean;
   targets: TargetProgress[];
   notes: string[];
   version: number;
+  relate?: RelateState;
 }
 
 export interface FileItem {
@@ -183,6 +195,66 @@ export interface DecisionItem {
   decided_at: number;
   status: string | null;
   has_preview: boolean;
+}
+
+export type ThumbClass = "original_ok" | "original_damaged" | "original_uncertain" | "orphan";
+
+export interface ThumbItem {
+  hash: string;
+  width: number;
+  height: number;
+  size: number;
+  has_preview: boolean;
+  class: ThumbClass;
+  kind: "thumbnail" | "reduced";
+  reason: string | null;
+  decided: boolean;
+  original: ContentBrief | null;
+}
+
+export interface CopyLocation {
+  file_id: number;
+  volume_id: string;
+  volume_label: string;
+  path: string;
+  online: boolean;
+  decision: Decision | null;
+}
+
+export interface ThumbDetail {
+  hash: string;
+  width: number;
+  height: number;
+  size: number;
+  has_preview: boolean;
+  class: ThumbClass;
+  kind: "thumbnail" | "reduced";
+  reason: string | null;
+  locations: CopyLocation[];
+  originals: (ContentBrief & { certain: boolean; locations: CopyLocation[] })[];
+}
+
+export interface ClusterBrief {
+  cluster: number;
+  members: number;
+  extra_bytes: number;
+  kind: "same_pixels" | "near";
+  sample: ContentBrief | null;
+}
+
+export interface ClusterMember extends ContentBrief {
+  has_exif: boolean;
+  camera: string | null;
+  software: string | null;
+  metadata_size: number;
+  locations: CopyLocation[];
+}
+
+export interface Cluster {
+  cluster: number;
+  suggested_keep: string;
+  suggestion_reason: string;
+  members: ClusterMember[];
 }
 
 /** Error from the API; ``refused`` lists images a decision would have left without a copy. */
@@ -330,6 +402,19 @@ export const api = {
   dupGroup: (hash: string) => request<DupGroup>("GET", `/api/review/duplicates/${hash}`),
   applySuggestions: (hashes: string[]) =>
     request<{ groups: number; discarded: number }>("POST", "/api/review/duplicates/apply-suggestions", { hashes }),
+  startRelate: () => request<RelateState>("POST", "/api/relate"),
+  thumbnails: (q: { cls?: string; kind?: string; undecided?: boolean }, offset = 0, limit = 100) =>
+    request<{ items: ThumbItem[]; counts: Record<string, number> }>(
+      "GET", `/api/review/thumbnails${qs({ ...q, offset, limit })}`),
+  thumbnail: (hash: string) => request<ThumbDetail>("GET", `/api/review/thumbnails/${hash}`),
+  discardVerifiedThumbnails: (kind: string) =>
+    request<{ images: number; files: number }>("POST", `/api/review/thumbnails/discard-verified${qs({ kind })}`),
+  similar: (undecided: boolean, offset = 0, limit = 100) =>
+    request<{ items: ClusterBrief[]; total: number; total_extra: number }>(
+      "GET", `/api/review/similar${qs({ undecided, offset, limit })}`),
+  cluster: (id: number) => request<Cluster>("GET", `/api/review/similar/${id}`),
+  keepClusterMember: (id: number, hash: string) =>
+    request<{ kept: number; discarded: number }>("POST", `/api/review/similar/${id}/keep/${hash}`),
   folderPairs: (volume?: string, offset = 0) =>
     request<{ items: FolderPair[]; total: number }>("GET", `/api/review/folder-pairs${qs({ volume, offset })}`),
   discardFolderCopies: (keep: FolderSide, discard: FolderSide) =>

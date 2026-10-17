@@ -259,6 +259,29 @@ def cmd_where(args) -> int:
     return 0
 
 
+def cmd_relate(args) -> int:
+    from . import relate
+
+    cat = open_catalog(args)
+    tty = sys.stdout.isatty()
+
+    def show(p) -> None:
+        pct = f"{100 * p.done / p.total:5.1f}%" if p.total else "     "
+        line = f"Relating images: {p.phase:10} {pct}  {p.pairs:,} relations found"
+        print(("\r" + line) if tty else line, end="" if tty else "\n", flush=True)
+
+    stop = {"flag": False}
+
+    def on_sigint(signum, frame):
+        stop["flag"] = True
+
+    signal.signal(signal.SIGINT, on_sigint)
+    finished = relate.run(cat, lambda: stop["flag"], show)
+    print()
+    print("Done." if finished else "Paused; run `imagelib relate` again to continue.")
+    return 0 if finished else 2
+
+
 # -- GUI ------------------------------------------------------------------------
 
 def cmd_serve(args) -> int:
@@ -277,7 +300,9 @@ def cmd_serve(args) -> int:
     if not args.no_browser:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
     # 127.0.0.1 only: the API can read your drives, so it must not be reachable from the network.
-    uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning")
+    # The live-update stream never ends on its own, so without a timeout an open browser
+    # tab would keep the server from ever shutting down (Ctrl+C would hang).
+    uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="warning", timeout_graceful_shutdown=3)
     return 0
 
 
@@ -308,6 +333,9 @@ def build_parser() -> argparse.ArgumentParser:
     scan.set_defaults(func=cmd_scan)
 
     sub.add_parser("status", help="catalog summary").set_defaults(func=cmd_status)
+
+    sub.add_parser("relate", help="find thumbnails, resized and near-identical copies (resumable)") \
+        .set_defaults(func=cmd_relate)
 
     serve = sub.add_parser("gui", aliases=["serve"], help="open the graphical interface in your browser")
     serve.add_argument("--port", type=int, default=8765)

@@ -23,7 +23,7 @@ from pydantic import BaseModel
 
 from . import analyze, discover, formats, queries, review, volumes
 from .catalog import Catalog
-from .jobs import OnlineVolumes, ScanManager
+from .jobs import OnlineVolumes, RelateManager, ScanManager
 from .previews import PreviewStore
 from .search import hash_file
 
@@ -89,16 +89,20 @@ class ScanRequest(BaseModel):
     resume: bool = False           # unfinished scans on connected volumes
 
 
-def create_app(catalog_dir: Path, workers: int | None = None) -> FastAPI:
+def create_app(catalog_dir: Path, workers: int | None = None, auto_relate: bool = True) -> FastAPI:
     catalog_dir = Path(catalog_dir)
     Catalog.shared(catalog_dir)  # create / migrate up front
     online = OnlineVolumes(catalog_dir)
-    scans = ScanManager(catalog_dir, online, workers=workers)
+    relater = RelateManager(catalog_dir)
+    scans = ScanManager(catalog_dir, online, workers=workers, relate_manager=relater)
     phash_index = queries.PhashIndex()
 
     @asynccontextmanager
     async def lifespan(app):
+        if auto_relate:
+            relater.start()  # catches up after scans made by the command line; no-op when current
         yield
+        relater.stop(wait=False)
         await asyncio.to_thread(scans.shutdown)
 
     app = FastAPI(title="imagelib", lifespan=lifespan)
@@ -369,6 +373,50 @@ def create_app(catalog_dir: Path, workers: int | None = None) -> FastAPI:
         try:
             return review.discard_folder_duplicates(cat(), req.keep_volume, req.keep_folder,
                                                     req.discard_volume, req.discard_folder)
+        except review.Refused as e:
+            return refused(e)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+    # -- relations: thumbnails & similar images ---------------------------------
+
+    @app.post("/api/relate")
+    def start_relate():
+        if not scans.running:
+            relater.start()
+        return relater.state()
+
+    @app.get("/api/review/thumbnails")
+    def review_thumbnails(cls: str | None = None, kind: str | None = None, undecided: bool = False,
+                          offset: int = 0, limit: int = Query(100, le=500)):
+        return review.thumbnails(cat(), cls or None, kind or None, undecided, offset, limit)
+
+    @app.get("/api/review/thumbnails/{hex_hash}")
+    def review_thumbnail(hex_hash: str):
+        detail = review.thumbnail_detail(cat(), parse_hash(hex_hash), set(online.get()))
+        if detail is None:
+            raise HTTPException(404, "not a thumbnail or reduced copy")
+        return detail
+
+    @app.post("/api/review/thumbnails/discard-verified")
+    def review_discard_thumbnails(kind: str | None = "thumbnail"):
+        try:
+            return review.discard_verified_thumbnails(cat(), kind or None)
+        except review.Refused as e:
+            return refused(e)
+
+    @app.get("/api/review/similar")
+    def review_similar(undecided: bool = False, offset: int = 0, limit: int = Query(100, le=500)):
+        return review.similar_clusters(cat(), undecided, offset, limit)
+
+    @app.get("/api/review/similar/{cluster}")
+    def review_similar_cluster(cluster: int):
+        return review.similar_cluster(cat(), cluster, set(online.get()))
+
+    @app.post("/api/review/similar/{cluster}/keep/{hex_hash}")
+    def review_similar_keep(cluster: int, hex_hash: str):
+        try:
+            return review.keep_cluster_member(cat(), cluster, parse_hash(hex_hash))
         except review.Refused as e:
             return refused(e)
         except ValueError as e:

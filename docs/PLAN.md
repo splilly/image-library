@@ -70,7 +70,8 @@ match to a larger image with the same aspect ratio. Outcome per thumbnail:
    and search with previews, drag-an-image-in "where is this?".
 3. **Corrupt review + exact duplicates review (done)** — keyboard-driven review screens,
    duplicate-folder pairs, decisions with last-copy protection.
-4. **Near-duplicates + thumbnail detection** — linking, classification, review.
+4. **Near-duplicates + thumbnail detection (done)** — pixel hashes, relate job,
+   thumbnail classification (incl. "not certain"), similar-image review.
 5. **Action plan** — quarantine, undo, purge, last-copy protection.
 6. **Hub/agent sync** — LAN sync, bundle export/import, relayed actions.
 7. **Packaging** — PyInstaller builds for all OSes via GitHub Actions; optional

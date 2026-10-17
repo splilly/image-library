@@ -8,6 +8,8 @@ const REASON_LABEL: Record<string, string> = {
   problem: "Problem files",
   duplicate: "Duplicates",
   folder: "Duplicate folders",
+  thumbnail: "Thumbnails",
+  similar: "Similar images",
   manual: "Chosen by hand",
 };
 

@@ -40,7 +40,7 @@ export default function App() {
         {route.page === "library" ? (
           <Library params={route.params} />
         ) : route.page === "review" ? (
-          <Review params={route.params} />
+          <Review params={route.params} scan={scan} />
         ) : route.page === "drives" ? (
           <Drives scan={scan} />
         ) : route.page === "find" ? (

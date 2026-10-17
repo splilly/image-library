@@ -25,9 +25,11 @@ from . import formats, phash
 #   2: strict JPEG checking (libjpeg-turbo warnings), RAW sensor data actually unpacked.
 #   3: perceptual hashes for damaged images, so intact originals can be found.
 #   4: JPEGs zero-padded after their end marker are no longer flagged as cut short.
-ANALYZER_VERSION = 4
+#   5: pixel hash, to find the same picture saved with different metadata.
+ANALYZER_VERSION = 5
 STALE_CONTENT = ("(analyzer_version < 2 OR (analyzer_version < 3 AND status != 'ok') "
-                 "OR (analyzer_version < 4 AND status = 'warning'))")
+                 "OR (analyzer_version < 4 AND status = 'warning') "
+                 "OR (analyzer_version < 5 AND kind != 'video' AND status = 'ok'))")
 
 SMALL_EDGE = 320
 MEDIUM_EDGE = 1024
@@ -65,6 +67,7 @@ class Result:
     has_exif: bool = False
     duration_s: float | None = None
     phash: int | None = None
+    pixel_hash: bytes | None = None  # same decoded picture => same value, whatever the metadata
     dhash: int | None = None
     metadata: dict[str, str] = field(default_factory=dict)
     previews: dict[str, bytes] = field(default_factory=dict)
@@ -323,7 +326,19 @@ def _finish_still(img: Image.Image, result: Result, job: Job, orientation: int |
     _check_grey_band(display, result)
     result.phash = phash.phash(display)
     result.dhash = phash.dhash(display)
+    if job.kind != formats.VIDEO:
+        result.pixel_hash = _pixel_hash(display)
     _make_previews(display, result, job)
+
+
+def _pixel_hash(display: Image.Image) -> bytes:
+    """Hash of the decoded, oriented picture (at working size). Files whose bytes differ
+    only in metadata (tags rewritten by an organiser, say) decode to identical pixels."""
+    import blake3
+
+    h = blake3.blake3(f"{display.mode}:{display.width}x{display.height}:".encode())
+    h.update(display.tobytes())
+    return h.digest(16)
 
 
 # EXIF orientation -> transforms that show the image upright (same table as ImageOps.exif_transpose).

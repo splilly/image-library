@@ -171,10 +171,15 @@ def test_pause_and_resume_through_the_api(api, drive):
     api.post("/api/scan/pause")
     state = wait_for_scan(api)
     unfinished = api.get("/api/summary").json()["unfinished_scans"]
-    # Either the pause landed (scan resumable) or the tiny library finished first.
-    assert (state["targets"][0]["state"] == "paused") == bool(unfinished)
+    # The pause landed before the scan began, while it ran (resumable), or after the tiny
+    # library had already finished.
+    paused = bool(state["targets"]) and state["targets"][0]["state"] == "paused"
+    assert paused == bool(unfinished)
     if unfinished:
         api.post("/api/scan", json={"resume": True}).raise_for_status()
+        wait_for_scan(api)
+    elif not state["targets"]:
+        api.post("/api/scan", json={"volume_ids": [vid]}).raise_for_status()
         wait_for_scan(api)
     summary = api.get("/api/summary").json()
     assert summary["pending"] == 0 and summary["files"] == 22 and not summary["unfinished_scans"]
@@ -247,3 +252,21 @@ def test_review_endpoints(scanned):
     assert intact[0]["locations"][0]["path"] == rel["photo4"]
     listing = api.get("/api/decisions", params={"decision": "discard"}).json()["items"]
     assert {i["path"] for i in listing} == {rel[f"dup{i}"] for i in (1, 2, 3)}
+
+
+
+def test_relations_run_after_scanning_and_feed_the_review_endpoints(scanned):
+    api, vid, root, rel = scanned
+    deadline = time.monotonic() + 60
+    while not api.get("/api/scan").json()["relate"]["current"]:
+        assert time.monotonic() < deadline, "relate did not finish after the scan"
+        time.sleep(0.2)
+    thumbs = api.get("/api/review/thumbnails").json()
+    classes = {i["class"] for i in thumbs["items"]}
+    assert {"original_ok", "orphan"} <= classes
+    first_ok = next(i for i in thumbs["items"] if i["class"] == "original_ok")
+    detail = api.get(f"/api/review/thumbnails/{first_ok['hash']}").json()
+    assert detail["originals"] and detail["originals"][0]["locations"]
+    result = api.post("/api/review/thumbnails/discard-verified").json()
+    assert result["images"] == 2
+    assert api.get("/api/review/similar").json()["total"] == 0  # the sample has no near-duplicates

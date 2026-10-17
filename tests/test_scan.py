@@ -207,8 +207,21 @@ def test_content_from_an_older_analyzer_is_rechecked_on_the_next_scan(drive, cat
     zeroed = file_row(catalog, vid, rel["zeroed"])["content_hash"]
     # Pretend an older analyzer once passed this file.
     catalog.conn.execute("UPDATE contents SET analyzer_version=1, status='ok' WHERE hash=?", (zeroed,))
-    # A newer analyzer that only changed problem files re-reads nothing else.
-    catalog.conn.execute("UPDATE contents SET analyzer_version=2 WHERE hash!=? AND status='ok'", (zeroed,))
+    # Everything else is up to date, so only that file is re-read.
+    from imagelib.analyze import ANALYZER_VERSION
+    catalog.conn.execute("UPDATE contents SET analyzer_version=? WHERE hash!=?", (ANALYZER_VERSION, zeroed))
     prog = scan(catalog, root, vid)
     assert prog.files_total == 1
     assert file_row(catalog, vid, rel["zeroed"])["status"] == "corrupt"
+
+
+def test_analyzer_upgrades_reread_only_the_results_they_affect(drive, catalog):
+    from imagelib.analyze import STALE_CONTENT
+
+    root, rel = drive
+    vid = register(catalog, root)
+    scan(catalog, root, vid)
+    # As if analyzed by v4: v5 (pixel hashes) affects intact stills only, not damaged files or videos.
+    catalog.conn.execute("UPDATE contents SET analyzer_version=4")
+    stale = {r[0] for r in catalog.conn.execute(f"SELECT kind || ':' || status FROM contents WHERE {STALE_CONTENT}")}
+    assert stale == {"image:ok", "psd:ok"}

@@ -12,7 +12,7 @@ import time
 from dataclasses import fields
 from pathlib import Path
 
-from . import volumes
+from . import relate, volumes
 from .catalog import Catalog
 from .previews import PreviewStore
 from .scanner import Scanner, TargetProgress
@@ -55,9 +55,53 @@ def progress_dict(p: TargetProgress) -> dict:
     return d
 
 
-class ScanManager:
-    def __init__(self, catalog_dir: Path, online: OnlineVolumes, workers: int | None = None):
+class RelateManager:
+    """Runs the relate job (relate.py) in the background; it is resumable, so stopping is cheap."""
+
+    def __init__(self, catalog_dir: Path):
         self.catalog_dir = catalog_dir
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
+        self.progress = relate.RelateProgress()
+
+    def start(self) -> None:
+        with self._lock:
+            if self._thread is not None:
+                return
+            self._stop.clear()
+            self._thread = threading.Thread(target=self._run, name="relate", daemon=True)
+            self._thread.start()
+
+    def stop(self, wait: bool = True) -> None:
+        self._stop.set()
+        thread = self._thread
+        if wait and thread:
+            thread.join(60)
+
+    def _run(self) -> None:
+        try:
+            def on_progress(p: relate.RelateProgress) -> None:
+                self.progress = relate.RelateProgress(**vars(p))
+
+            relate.run(Catalog.shared(self.catalog_dir), self._stop.is_set, on_progress)
+        except Exception as e:
+            self.progress = relate.RelateProgress(state="failed", message=f"{type(e).__name__}: {e}")
+        finally:
+            with self._lock:
+                self._thread = None
+
+    def state(self) -> dict:
+        p = self.progress
+        current = relate.is_current(Catalog.shared(self.catalog_dir))
+        return {**vars(p), "running": self._thread is not None, "current": current}
+
+
+class ScanManager:
+    def __init__(self, catalog_dir: Path, online: OnlineVolumes, workers: int | None = None,
+                 relate_manager: RelateManager | None = None):
+        self.catalog_dir = catalog_dir
+        self.relate = relate_manager  # paused while scanning, run when scanning ends
         self.online = online
         self.workers = workers
         self._lock = threading.Lock()
@@ -84,6 +128,10 @@ class ScanManager:
             self._thread = threading.Thread(target=self._run, name="scan-manager", daemon=True)
             self._thread.start()
 
+    def _before_scanning(self) -> None:
+        if self.relate:
+            self.relate.stop(wait=True)  # one CPU-heavy job at a time; relate resumes later
+
     def pause(self) -> None:
         with self._lock:
             self._pause_requested = True
@@ -104,12 +152,16 @@ class ScanManager:
     def state(self) -> dict:
         scanner = self._scanner
         live = [progress_dict(p) for p in scanner.progress.values()] if scanner else []
-        return {"running": self.running, "pausing": self._pause_requested and self.running,
-                "targets": live or self.last, "notes": list(self.notes), "version": self.version}
+        state = {"running": self.running, "pausing": self._pause_requested and self.running,
+                 "targets": live or self.last, "notes": list(self.notes), "version": self.version}
+        if self.relate:
+            state["relate"] = self.relate.state()
+        return state
 
     # -- runner ------------------------------------------------------------
 
     def _run(self) -> None:
+        self._before_scanning()
         while True:
             with self._lock:
                 if self._pause_requested:
@@ -120,6 +172,8 @@ class ScanManager:
                     self._thread = None
                     self._scanner = None
                     self.version += 1
+                    if self.relate:
+                        self.relate.start()
                     return
                 batch = list(self._wanted)
             try:

@@ -1,8 +1,10 @@
 # Self-contained builds for Windows, macOS and Linux.
-# Runs on demand (Actions tab) and for version tags; a tag also publishes a release.
+# Runs for pull requests, on demand (Actions tab) and for version tags; a tag also
+# publishes a release.
 name: build
 
 on:
+  pull_request:
   workflow_dispatch:
   push:
     tags: ["v*"]

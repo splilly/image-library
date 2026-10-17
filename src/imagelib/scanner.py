@@ -16,6 +16,10 @@ Failure handling
 ----------------
 * Drive unplugged: detected via the volume marker; the volume's scan becomes
   ``offline`` and resumes from where it was next time. Other volumes carry on.
+* Memory: the bytes waiting between readers and workers are capped, large decodes
+  reserve memory from a gate shared by all workers, and no new work is handed out
+  while the machine is low on free memory. A huge panorama or TIFF must never be
+  able to exhaust RAM, however many of them happen to arrive together.
 * A decoder crashing (segfault) on a malformed file takes its whole process pool
   down with it, and the culprit is unknown. The pool is rebuilt and every file that
   was in flight is re-run alone ("isolation"); one that crashes alone is recorded as
@@ -38,14 +42,16 @@ from pathlib import Path
 
 import blake3
 
-from . import analyze, discover, formats
+from . import analyze, discover, formats, sysmem
 from .catalog import Catalog, to_signed64
 from .previews import PreviewStore
 from .volumes import marker_present
 
+GB = 1024 ** 3
 INLINE_LIMIT = 256 * 1024 * 1024     # files up to this size are read into memory once
 READ_CHUNK = 8 * 1024 * 1024
-MAX_INFLIGHT_BYTES = 1536 * 1024 * 1024
+WORKER_RAM = int(1.5 * GB)           # default worker count allows this much RAM per worker
+LOW_MEMORY = 0.10                    # pause handing out work below this fraction free
 COMMIT_INTERVAL = 1.0
 ANALYSIS_TIMEOUT = 600.0             # seconds before a stuck decoder is killed
 
@@ -130,6 +136,10 @@ class _Inflight:
     isolated: bool = False
 
 
+class WorkersBroken(RuntimeError):
+    pass
+
+
 class ByteBudget:
     """Caps the bytes held in memory between the readers and the analyzers."""
 
@@ -159,12 +169,15 @@ class Scanner:
                  analysis_timeout: float = ANALYSIS_TIMEOUT):
         self.catalog = catalog
         self.previews = previews
-        self.workers = workers or max(1, (os.cpu_count() or 2) - 1)
+        total = sysmem.total_bytes() or 8 * GB
+        self.total_memory = total
+        self.workers = workers or max(1, min((os.cpu_count() or 2) - 1, total // WORKER_RAM))
         self.make_medium = make_medium_previews
         self.progress_cb = progress_cb
         self.analysis_timeout = analysis_timeout
         self.stop_event = threading.Event()
-        self.budget = ByteBudget(MAX_INFLIGHT_BYTES)
+        # File bytes queued for analysis: ~5% of RAM, between 512 MB and 1.5 GB.
+        self.budget = ByteBudget(min(int(1.5 * GB), max(GB // 2, total // 20)))
         self.queue: queue.Queue = queue.Queue(maxsize=self.workers * 4)
         self.progress: dict[int, TargetProgress] = {}
         self._crash_after = crash_after_files  # test hook: simulate a hard crash
@@ -209,6 +222,13 @@ class Scanner:
             for r in readers:
                 r.start()
             self._dispatch_loop(targets)
+        except WorkersBroken as e:
+            self.stop_event.set()
+            for t in targets:
+                prog = self.progress[t.scan_id]
+                if prog.state not in ("done", "paused", "offline", "failed"):
+                    prog.state, prog.message = "failed", str(e)
+                    self.catalog.set_scan_state(t.scan_id, "failed", str(e))
         finally:
             self._pool.shutdown(wait=False, cancel_futures=True)
             self._flush()
@@ -312,8 +332,11 @@ class Scanner:
         for var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
             os.environ.setdefault(var, "1")
         # "spawn" everywhere: it is the only option on Windows, and fork with threads is unsafe.
+        ctx = multiprocessing.get_context("spawn")
+        # A fresh gate per pool: a killed worker may have died holding reservations.
+        gate = analyze.DecodeGate(ctx, int(self.total_memory * 0.4))
         return ProcessPoolExecutor(max_workers=self.workers, initializer=analyze.init_worker,
-                                   mp_context=multiprocessing.get_context("spawn"))
+                                   initargs=(gate,), mp_context=ctx)
 
     def _dispatch_loop(self, targets: list[Target]) -> None:
         last_commit = last_progress = time.monotonic()
@@ -324,8 +347,9 @@ class Scanner:
                 break
             self._advance_isolation()
             # Keep the pool just busy enough; reads back up into the queue, then the readers wait.
+            low_memory = self._low_memory()
             for _ in range(256):
-                if len(self._inflight) >= self.workers * 2:
+                if len(self._inflight) >= self.workers * 2 or (low_memory and self._inflight):
                     time.sleep(0.01)
                     break
                 try:
@@ -343,6 +367,15 @@ class Scanner:
                 last_progress = now
         self._flush()
         self._update_progress()
+
+    def _low_memory(self) -> bool:
+        """True while free RAM is scarce; checked a few times a second."""
+        now = time.monotonic()
+        if now - getattr(self, "_mem_checked", 0.0) > 0.25:
+            self._mem_checked = now
+            avail = sysmem.available_bytes()
+            self._mem_low = avail is not None and avail < self.total_memory * LOW_MEMORY
+        return self._mem_low
 
     def _handle(self, msg) -> None:
         if isinstance(msg, _Read):
@@ -393,6 +426,7 @@ class Scanner:
     def _collect(self) -> None:
         now = time.monotonic()
         crashed = False
+        culprits: list[bytes] = []
         hung: list[bytes] = []
         for h, entry in list(self._inflight.items()):
             fut = entry.future
@@ -400,8 +434,8 @@ class Scanner:
                 try:
                     result = fut.result()
                 except BrokenProcessPool:
-                    if entry.isolated:  # crashed while running alone: it is the culprit
-                        self._content_done(h, entry, self._failure("decoder crashed on this file"))
+                    if entry.isolated:  # crashed while running alone: it is the culprit...
+                        culprits.append(h)
                     crashed = True
                     continue
                 except Exception as e:
@@ -415,6 +449,13 @@ class Scanner:
                 self._content_done(h, self._inflight[h], self._failure("decoder hung on this file"))
         if crashed or hung:
             self._rebuild_pool()
+            if culprits:
+                # ...unless workers cannot run anything at all, which is not the file's fault.
+                if not self._pool_works():
+                    raise WorkersBroken("analysis worker processes keep dying even on an empty job; "
+                                        "no files were marked corrupt")
+                for h in culprits:
+                    self._content_done(h, self._inflight[h], self._failure("decoder crashed on this file"))
             survivors = list(self._inflight.items())
             self._inflight.clear()
             for h, entry in survivors:
@@ -436,6 +477,12 @@ class Scanner:
             for msg in held:
                 self._outstanding[msg.target.scan_id] -= 1  # _handle counts it again
                 self._handle(msg)
+
+    def _pool_works(self) -> bool:
+        try:
+            return self._pool.submit(analyze.ping).result(timeout=120) is True
+        except Exception:
+            return False
 
     @staticmethod
     def _failure(problem: str) -> analyze.Result:

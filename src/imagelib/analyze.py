@@ -73,6 +73,7 @@ class Result:
 
 
 _initialized = False
+_gate: DecodeGate | None = None
 _TEST_HOOKS = os.environ.get("IMAGELIB_TEST_HOOKS") == "1"
 
 
@@ -85,9 +86,40 @@ def _test_hook(data: bytes) -> None:
         time.sleep(3600)
 
 
-def init_worker() -> None:
+class DecodeGate:
+    """Memory reservations shared by all worker processes.
+
+    Ordinary photos decode without touching the gate. A job whose decode needs more
+    than one unit (a panorama, a huge TIFF/PSD, a big RAW) first reserves enough
+    units, so only as many giants run at once as memory allows. Reservations are
+    taken under a lock, so two large jobs can never deadlock holding half each.
+    """
+
+    UNIT = 256 * 1024 * 1024
+
+    def __init__(self, ctx, budget_bytes: int):
+        self.units = max(1, budget_bytes // self.UNIT)
+        self._lock = ctx.Lock()
+        self._sem = ctx.Semaphore(self.units)
+
+    def reserve(self, estimate: int) -> int:
+        n = 0 if estimate <= self.UNIT else min(self.units, -(-estimate // self.UNIT))
+        if n:
+            with self._lock:
+                for _ in range(n):
+                    self._sem.acquire()
+        return n
+
+    def release(self, n: int) -> None:
+        for _ in range(n):
+            self._sem.release()
+
+
+def init_worker(gate: DecodeGate | None = None) -> None:
     """Per-process setup; safe to call more than once."""
-    global _initialized
+    global _initialized, _gate
+    if gate is not None:
+        _gate = gate
     if _initialized:
         return
     import signal
@@ -98,6 +130,8 @@ def init_worker() -> None:
     # Ctrl+C means "pause" to the main process, which lets workers finish their file.
     parent = multiprocessing.parent_process()
     if parent is not None:
+        if _TEST_HOOKS and os.environ.get("IMAGELIB_TEST_BROKEN_WORKERS") == "1":
+            os._exit(1)  # tests: a worker environment that cannot start at all
         signal.signal(signal.SIGINT, signal.SIG_IGN)
         # If the main process dies (crash, power-button kill), don't linger as an orphan.
         import threading
@@ -118,6 +152,7 @@ def analyze(job: Job) -> Result:
     if _TEST_HOOKS and job.data is not None:
         _test_hook(job.data)
     result = Result()
+    reserved = _gate.reserve(_estimate_decode_bytes(job)) if _gate else 0
     try:
         if job.kind == formats.VIDEO:
             _analyze_video(job, result)
@@ -136,7 +171,31 @@ def analyze(job: Job) -> Result:
         result.flag(WARNING, "too large to verify in available memory")
     except Exception as e:  # never let one bad file kill the worker
         result.flag(CORRUPT, f"analysis failed: {type(e).__name__}: {e}")
+    finally:
+        if reserved:
+            _gate.release(reserved)
     return result
+
+
+def ping() -> bool:
+    """Health check: proves a worker process can start and run a job."""
+    init_worker()
+    return True
+
+
+def _estimate_decode_bytes(job: Job) -> int:
+    """Rough peak memory to analyze this job, from the header only (nothing is decoded)."""
+    if job.kind == formats.VIDEO or job.size == 0:
+        return 0
+    if job.kind == formats.RAW:
+        return job.size * 5  # unpacked 16-bit sensor data plus a half-size render
+    try:
+        with Image.open(_source(job)) as im:
+            w, h = im.size
+        # decoded image + 8-bit/RGBA working copy; layered PSD rendering needs more
+        return w * h * (16 if job.kind == formats.PSD else 8)
+    except Exception:
+        return job.size * 4
 
 
 def _source(job: Job):

@@ -5,6 +5,7 @@ import { bytes, count, navigate, plural, useLoad } from "../util";
 
 const STATUS_LABEL: Record<string, string> = {
   pending: "To move",
+  relayed: "Sent to agent",
   moving: "Moving",
   quarantined: "In quarantine",
   blocked: "Blocked (safety check)",
@@ -13,7 +14,7 @@ const STATUS_LABEL: Record<string, string> = {
   restored: "Restored",
   purged: "Deleted",
 };
-const ORDER = ["pending", "quarantined", "blocked", "skipped", "failed", "restored", "purged", "moving"];
+const ORDER = ["pending", "relayed", "quarantined", "blocked", "skipped", "failed", "restored", "purged", "moving"];
 
 function n(c: Counts, ...keys: string[]) {
   return keys.reduce((sum, k) => sum + (c[k]?.files ?? 0), 0);
@@ -125,7 +126,9 @@ function PlanView({ id, scan, onChanged }: { id: number; scan: ScanState | null;
               <td>
                 <OnlineDot online={v.online} /> {v.label}
                 {v.read_only && <span className="tag">read-only</span>}
-                {!v.online && !v.read_only && <div className="muted small">connect it to carry out its part</div>}
+                {!v.online && !v.read_only && (v.agent
+                  ? <div className="muted small">connected to {v.agent}: it carries out its part on its next sync</div>
+                  : <div className="muted small">connect it to carry out its part</div>)}
               </td>
               <td className="num">{count(n(v.counts, "pending"))} <span className="muted small">{bytes(b(v.counts, "pending"))}</span></td>
               <td className="num">{count(n(v.counts, "quarantined"))}</td>

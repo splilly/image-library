@@ -52,7 +52,7 @@ def test_quarantine_restore_and_purge(lib):
     assert cat.summary()["redundant_copies"] == 2  # no longer counted as a duplicate
 
     restored = plans.restore(cat, plan["id"], ctx(cat)[0])
-    assert restored == {"restored": 1, "problems": []}
+    assert restored == {"restored": 1, "relayed": 0, "problems": []}
     assert (root / rel["dup1"]).read_bytes() == original
     assert file_row(cat, vid, rel["dup1"])["state"] == "done"
     assert review.file_decisions(cat, [ids["dup1"]]) == {}  # decision withdrawn with the restore

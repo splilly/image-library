@@ -105,7 +105,8 @@ export default function Dashboard({ scan }: { scan: ScanState | null }) {
           <tbody>
             {vols.data?.map((v) => (
               <tr key={v.id} onClick={() => navigate("library", { volume: v.id })} className="clickable">
-                <td><OnlineDot online={v.online} /> {v.label} {v.read_only && <span className="tag">read-only</span>}</td>
+                <td><OnlineDot online={v.online || !!v.agent} /> {v.label} {v.read_only && <span className="tag">read-only</span>}
+                  {v.agent && !v.online && <span className="tag">on {v.agent.machine ?? "agent"}</span>}</td>
                 <td className="num">{count(v.stats.files)} files</td>
                 <td className="num">{bytes(v.stats.bytes)}</td>
                 <td className="num muted">{v.stats.pending ? `${count(v.stats.pending)} not scanned` : ""}</td>

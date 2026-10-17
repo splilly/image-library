@@ -74,7 +74,7 @@ function DriveCard({ v, scan, onScan, onScanFolder, onRename }: {
         )}
       </div>
       <div className="muted small">
-        {v.online ? <>Connected at <code>{v.root}</code></> : <>Not connected · last seen {ago(v.last_seen_at)}
+        {v.online ? <>Connected at <code>{v.root}</code></> : v.agent ? <>Connected to <strong>{v.agent.machine ?? "an agent"}</strong> at <code>{v.agent.root}</code> — it scans this drive and carries out actions for it</> : <>Not connected · last seen {ago(v.last_seen_at)}
           {v.last_seen_path ? <> at <code>{v.last_seen_path}</code></> : null}</>}
       </div>
       <div className="drive-stats">
@@ -87,7 +87,8 @@ function DriveCard({ v, scan, onScan, onScanFolder, onRename }: {
       </div>
       {progress && (scanning || progress.state !== "done") && <ScanProgress t={progress} />}
       <div className="row">
-        <button className="btn" disabled={!v.online || scanning} onClick={onScan}>
+        <button className="btn" disabled={!v.online || scanning} onClick={onScan}
+          title={v.agent && !v.online ? "Scanned by the agent it is connected to" : undefined}>
           {st.pending ? "Continue scan" : "Scan whole drive"}
         </button>
         <button className="btn" disabled={!v.online || scanning} onClick={onScanFolder}>Scan a folder…</button>

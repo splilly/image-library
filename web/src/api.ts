@@ -39,6 +39,28 @@ export interface Volume {
   last_seen_path: string | null;
   fingerprints: string[];
   stats: VolumeStats;
+  agent: { machine_id: string; machine: string | null; root: string } | null;
+}
+
+export interface AgentInfo {
+  id: string;
+  name: string;
+  created_at: number;
+  last_sync_at: number | null;
+  machine: string | null;
+  os: string | null;
+  connected_volumes: string[];
+}
+
+export interface HubState {
+  url: string;
+  token: string;
+  cf_client_id: string;
+  cf_client_secret: string;
+  last_sync_at: number | null;
+  last_error: string | null;
+  running: boolean;
+  last: { files: number; contents: number; previews: number; actions: number; results: number } | null;
 }
 
 export interface TargetProgress {
@@ -99,7 +121,7 @@ export interface PlanSummary {
 export interface PlanDetail {
   id: number;
   created_at: number;
-  volumes: { volume_id: string; label: string; read_only: boolean; online: boolean; counts: Counts }[];
+  volumes: { volume_id: string; label: string; read_only: boolean; online: boolean; agent: string | null; counts: Counts }[];
 }
 
 export interface PlanItem {
@@ -515,6 +537,19 @@ export const api = {
   setPassword: (password: string) => request<RemoteState>("POST", "/api/remote/password", { password }),
   revokeSession: (id: string) => request<RemoteState>("POST", `/api/remote/sessions/${id}/revoke`),
   cloudflared: (action: "start" | "stop") => request<RemoteState>("POST", `/api/remote/cloudflared/${action}`),
+  agents: () => request<AgentInfo[]>("GET", "/api/remote/agents"),
+  addAgent: (name: string) => request<{ id: string; token: string }>("POST", "/api/remote/agents", { name }),
+  revokeAgent: (id: string) => request<AgentInfo[]>("POST", `/api/remote/agents/${id}/revoke`),
+  hub: () => request<HubState>("GET", "/api/remote/hub"),
+  updateHub: (changes: Partial<Pick<HubState, "url" | "token" | "cf_client_id" | "cf_client_secret">>) =>
+    request<HubState>("PUT", "/api/remote/hub", changes),
+  syncNow: () => request<HubState>("POST", "/api/remote/hub/sync"),
+  bundleExportUrl: (full: boolean) => `/api/remote/bundle/export${full ? "?full=true" : ""}`,
+  importBundle: (file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return request<{ files: number; contents: number; previews: number }>("POST", "/api/remote/bundle/import", form);
+  },
   folderPairs: (volume?: string, offset = 0) =>
     request<{ items: FolderPair[]; total: number }>("GET", `/api/review/folder-pairs${qs({ volume, offset })}`),
   discardFolderCopies: (keep: FolderSide, discard: FolderSide) =>

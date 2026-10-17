@@ -12,7 +12,7 @@ import time
 from dataclasses import fields
 from pathlib import Path
 
-from . import plans, relate, volumes
+from . import plans, relate, sync, volumes
 from .catalog import Catalog
 from .previews import PreviewStore
 from .scanner import Scanner, TargetProgress
@@ -155,12 +155,72 @@ class PlanManager:
         return None if p is None else {**vars(p), "running": self.running}
 
 
+class SyncManager:
+    """Agent side: exchanges with the hub after every scan session and every few minutes."""
+
+    INTERVAL = 300
+
+    def __init__(self, catalog_dir: Path):
+        self.catalog_dir = catalog_dir
+        self.scans: ScanManager | None = None
+        self.plans: PlanManager | None = None
+        self._wake = threading.Event()
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self.running = False
+        self.last: dict | None = None
+        self._thread = threading.Thread(target=self._loop, name="sync", daemon=True)
+
+    def start_background(self) -> None:
+        self._thread.start()
+
+    def request(self) -> None:
+        self._wake.set()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._wake.set()
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            self._wake.wait(self.INTERVAL)
+            self._wake.clear()
+            if not self._stop.is_set():
+                self.run_once()
+
+    def run_once(self) -> dict | None:
+        cat = Catalog.shared(self.catalog_dir)
+        cfg = sync.load_hub(cat)
+        if not (cfg.url and cfg.token) or not self._lock.acquire(blocking=False):
+            return None
+        self.running = True
+        try:
+            busy = bool((self.scans and self.scans.running) or (self.plans and self.plans.running))
+            client = sync.HubClient(cfg)
+            self.last = sync.sync_with_hub(cat, PreviewStore.shared(cat.previews_path), client.post,
+                                           run_actions=not busy)
+            return self.last
+        except Exception as e:
+            cfg = sync.load_hub(cat)
+            cfg.last_error = str(e)
+            sync.save_hub(cat, cfg)
+            return None
+        finally:
+            self.running = False
+            self._lock.release()
+
+    def state(self) -> dict:
+        cfg = sync.load_hub(Catalog.shared(self.catalog_dir))
+        return {**cfg.public(), "running": self.running, "last": self.last}
+
+
 class ScanManager:
     def __init__(self, catalog_dir: Path, online: OnlineVolumes, workers: int | None = None,
                  relate_manager: RelateManager | None = None):
         self.catalog_dir = catalog_dir
         self.relate = relate_manager  # paused while scanning, run when scanning ends
         self.plans: PlanManager | None = None
+        self.sync: SyncManager | None = None  # an agent sends its results after every scan session
         self.online = online
         self.workers = workers
         self._lock = threading.Lock()
@@ -237,6 +297,8 @@ class ScanManager:
                     self.version += 1
                     if self.relate:
                         self.relate.start()
+                    if self.sync:
+                        self.sync.request()
                     return
                 batch = list(self._wanted)
             try:

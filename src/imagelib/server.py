@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sqlite3
 import tempfile
 import time
 from contextlib import asynccontextmanager
@@ -25,9 +26,9 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import analyze, discover, formats, plans, queries, remote, review, volumes
+from . import analyze, discover, formats, plans, queries, remote, review, sync, volumes
 from .catalog import Catalog
-from .jobs import Busy, OnlineVolumes, PlanManager, RelateManager, ScanManager
+from .jobs import Busy, OnlineVolumes, PlanManager, RelateManager, ScanManager, SyncManager
 from .previews import PreviewStore
 from .search import hash_file
 
@@ -59,9 +60,17 @@ class AccessControl:
         problem, status = None, 403
         if verdict.kind == "forbidden":
             problem = verdict.problem
+        elif path.startswith("/api/sync/"):
+            # Agents: their token opens the sync endpoints and nothing else.
+            auth = request.headers.get("authorization", "")
+            agent = sync.agent_for_token(self.access.catalog(), auth[7:] if auth.lower().startswith("bearer ") else None)
+            if agent is None:
+                problem, status = "invalid or revoked agent token", 401
+            else:
+                scope["state"]["agent"] = dict(agent)
         elif request.method not in ("GET", "HEAD", "OPTIONS") and request.headers.get(CSRF_HEADER) != "1":
             problem = f"missing {CSRF_HEADER} header"
-        elif verdict.kind == "remote" and path.startswith("/api/"):
+        elif verdict.kind == "remote" and path.startswith("/api/") and not path.startswith("/api/sync/"):
             if path.startswith(LOCAL_ONLY):
                 problem = "this can only be changed on the computer running the app"
             elif not path.startswith(REMOTE_PUBLIC) and not remote.valid_session(
@@ -151,6 +160,17 @@ class PlanPurge(BaseModel):
     confirm: str
 
 
+class AgentCreate(BaseModel):
+    name: str
+
+
+class HubUpdate(BaseModel):
+    url: str | None = None
+    token: str | None = None
+    cf_client_id: str | None = None
+    cf_client_secret: str | None = None
+
+
 class HashList(BaseModel):
     hashes: list[str]
 
@@ -171,6 +191,8 @@ def create_app(catalog_dir: Path, workers: int | None = None, auto_relate: bool 
     scans = ScanManager(catalog_dir, online, workers=workers, relate_manager=relater)
     plan_runner = PlanManager(catalog_dir, online, relater)
     plan_runner.scans, scans.plans = scans, plan_runner
+    syncer = SyncManager(catalog_dir)
+    syncer.scans, syncer.plans, scans.sync = scans, plan_runner, syncer
     access = AccessState(catalog_dir)
     tunnel = remote.CloudflaredProcess()
     phash_index = queries.PhashIndex()
@@ -179,6 +201,7 @@ def create_app(catalog_dir: Path, workers: int | None = None, auto_relate: bool 
     async def lifespan(app):
         if auto_relate:
             relater.start()  # catches up after scans made by the command line; no-op when current
+            syncer.start_background()
         s = access.settings()
         if s.cloudflare_enabled and s.cloudflare_tunnel_token and tunnel.binary():
             try:
@@ -187,6 +210,7 @@ def create_app(catalog_dir: Path, workers: int | None = None, auto_relate: bool 
                 pass
         yield
         tunnel.stop()
+        syncer.stop()
         relater.stop(wait=False)
         plan_runner.stop()
         await asyncio.to_thread(scans.shutdown)
@@ -215,11 +239,13 @@ def create_app(catalog_dir: Path, workers: int | None = None, auto_relate: bool 
     def list_volumes(refresh: bool = False):
         c = cat()
         up = online.get(force=refresh)
+        at_agents = sync.agent_presence(c)
         out = []
         for v in c.list_volumes():
             out.append({
                 "id": v["id"], "label": v["label"], "notes": v["notes"], "read_only": bool(v["read_only"]),
                 "total_bytes": v["total_bytes"], "online": v["id"] in up,
+                "agent": at_agents.get(v["id"]) if v["id"] not in up else None,
                 "root": str(up[v["id"]]) if v["id"] in up else None,
                 "last_seen_at": v["last_seen_at"], "last_seen_path": v["last_seen_path"],
                 "fingerprints": sorted(f"{k} {val}" for k, val in c.fingerprints(v["id"])),
@@ -606,7 +632,82 @@ def create_app(catalog_dir: Path, workers: int | None = None, auto_relate: bool 
             raise HTTPException(404, "unknown action")
         return remote_state()
 
+    # -- hub & agents ------------------------------------------------------------
+
+    @app.post("/api/sync/exchange")
+    def sync_exchange(request: Request, payload: dict):
+        agent = request.scope["state"]["agent"]
+        payload["_agent_id"] = agent["id"]
+        c = cat()
+        result = sync.merge(c, payload, previews())
+        if not payload.get("more"):
+            result["actions"] = sync.actions_for(c, payload["agent"]["machine_id"], online.get())
+        return result
+
+    @app.post("/api/sync/previews")
+    def sync_previews(body: dict):
+        return {"stored": sync.store_previews(previews(), body.get("previews", []))}
+
+    @app.get("/api/remote/agents")
+    def get_agents():
+        return sync.list_agents(cat())
+
+    @app.post("/api/remote/agents")
+    def create_agent(req: AgentCreate):
+        return sync.add_agent(cat(), req.name)
+
+    @app.post("/api/remote/agents/{agent_id}/revoke")
+    def revoke_agent(agent_id: str):
+        sync.revoke_agent(cat(), agent_id)
+        return sync.list_agents(cat())
+
+    @app.get("/api/remote/hub")
+    def get_hub():
+        return syncer.state()
+
+    @app.put("/api/remote/hub")
+    def put_hub(req: HubUpdate):
+        c = cat()
+        cfg = sync.load_hub(c)
+        for key, value in req.model_dump(exclude_none=True).items():
+            setattr(cfg, key, value.strip())
+        if req.url is not None and req.url and not req.url.startswith(("https://", "http://127.0.0.1", "http://localhost")):
+            raise HTTPException(400, "use the hub's https:// address (Tailscale or Cloudflare)")
+        sync.save_hub(c, cfg)
+        return syncer.state()
+
+    @app.post("/api/remote/hub/sync")
+    async def hub_sync_now():
+        await asyncio.to_thread(syncer.run_once)
+        return syncer.state()
+
+    @app.get("/api/remote/bundle/export")
+    def bundle_export(full: bool = False):
+        out = Path(tempfile.mkstemp(suffix=".imagelib-bundle", dir=catalog_dir)[1])
+        sync.export_bundle(cat(), previews(), out, full=full)
+        from starlette.background import BackgroundTask
+
+        name = f"imagelib-{time.strftime('%Y%m%d-%H%M')}.imagelib-bundle"
+        return FileResponse(out, media_type="application/octet-stream", filename=name,
+                            background=BackgroundTask(out.unlink, missing_ok=True))
+
+    @app.post("/api/remote/bundle/import")
+    def bundle_import(file: UploadFile = File(...)):
+        with tempfile.NamedTemporaryFile(suffix=".imagelib-bundle", dir=catalog_dir, delete=False) as tmp:
+            while chunk := file.file.read(8 << 20):
+                tmp.write(chunk)
+            path = Path(tmp.name)
+        try:
+            return sync.import_bundle(cat(), previews(), path)
+        except (ValueError, sqlite3.DatabaseError) as e:
+            raise HTTPException(400, f"not a valid bundle: {e}")
+        finally:
+            path.unlink(missing_ok=True)
+
     # -- action plans ------------------------------------------------------------
+
+    def agent_relay() -> dict[str, str]:
+        return {vid: p["machine_id"] for vid, p in sync.agent_presence(cat()).items()}
 
     @app.post("/api/plans")
     def create_plan():
@@ -618,9 +719,13 @@ def create_app(catalog_dir: Path, workers: int | None = None, auto_relate: bool 
 
     @app.get("/api/plans/{plan_id}")
     def plan_detail(plan_id: int):
-        d = plans.detail(cat(), plan_id, online.get())
+        c = cat()
+        d = plans.detail(c, plan_id, online.get())
         if d is None:
             raise HTTPException(404, "no such plan")
+        at_agents = sync.agent_presence(c)
+        for v in d["volumes"]:
+            v["agent"] = (at_agents.get(v["volume_id"]) or {}).get("machine") if not v["online"] else None
         return d
 
     @app.get("/api/plans/{plan_id}/items")
@@ -645,7 +750,7 @@ def create_app(catalog_dir: Path, workers: int | None = None, auto_relate: bool 
     def plan_restore(plan_id: int, req: PlanRestore):
         if plan_runner.running:
             raise HTTPException(409, "wait for the running plan to finish")
-        return plans.restore(cat(), plan_id, online.get(force=True), req.item_ids)
+        return plans.restore(cat(), plan_id, online.get(force=True), req.item_ids, relay=agent_relay())
 
     @app.post("/api/plans/{plan_id}/purge")
     def plan_purge(plan_id: int, req: PlanPurge):
@@ -653,7 +758,7 @@ def create_app(catalog_dir: Path, workers: int | None = None, auto_relate: bool 
             raise HTTPException(400, 'type "delete" to confirm')
         if plan_runner.running:
             raise HTTPException(409, "wait for the running plan to finish")
-        return plans.purge(cat(), plan_id, online.get(force=True))
+        return plans.purge(cat(), plan_id, online.get(force=True), relay=agent_relay())
 
     @app.get("/api/plans/{plan_id}/manual-list/{volume_id}")
     def plan_manual_list(plan_id: int, volume_id: str):

@@ -381,3 +381,5 @@ kbd { font: 11px ui-monospace, Menlo, monospace; border: 1px solid var(--border)
 .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 0 16px; }
 .grid2 .field { margin: 6px 0; }
 .log { font: 11px ui-monospace, Menlo, monospace; background: var(--surface-2); padding: 8px; border-radius: 6px; max-height: 160px; overflow: auto; margin: 0; }
+.token { word-break: break-all; }
+.item-relayed { background: var(--accent-soft); color: var(--accent); }

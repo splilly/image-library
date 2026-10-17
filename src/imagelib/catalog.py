@@ -22,7 +22,7 @@ import unicodedata
 import uuid
 from pathlib import Path
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -237,6 +237,61 @@ _MIGRATIONS = {
         via          TEXT NOT NULL,                  -- tailscale | cloudflare
         client       TEXT NOT NULL,                  -- who/where, for the device list
         user_agent   TEXT NOT NULL DEFAULT ''
+    );
+    """,
+    8: """
+    -- Hub & agents (sync.py). When a file row last really changed, for incremental sync and
+    -- for resolving conflicts between machines (most recent change wins). Maintained by
+    -- triggers; a writer that sets changed_at itself (applying another machine's row) keeps it.
+    ALTER TABLE files ADD COLUMN changed_at REAL NOT NULL DEFAULT 0;
+    UPDATE files SET changed_at = coalesce(analyzed_at, first_seen_at);
+    CREATE INDEX files_changed ON files(changed_at, id);
+    CREATE TRIGGER files_changed_insert AFTER INSERT ON files WHEN NEW.changed_at = 0 BEGIN
+        UPDATE files SET changed_at = (julianday('now') - 2440587.5) * 86400.0 WHERE id = NEW.id;
+    END;
+    CREATE TRIGGER files_changed_update AFTER UPDATE ON files
+    WHEN NEW.changed_at IS OLD.changed_at AND (OLD.size IS NOT NEW.size OR OLD.mtime_ns IS NOT NEW.mtime_ns
+        OR OLD.state IS NOT NEW.state OR OLD.content_hash IS NOT NEW.content_hash OR OLD.error IS NOT NEW.error)
+    BEGIN
+        UPDATE files SET changed_at = (julianday('now') - 2440587.5) * 86400.0 WHERE id = NEW.id;
+    END;
+
+    -- Hub side: agents allowed to sync, and where their drives were last seen connected.
+    CREATE TABLE agents (
+        id           TEXT PRIMARY KEY,
+        name         TEXT NOT NULL,
+        token_hash   TEXT NOT NULL UNIQUE,
+        created_at   REAL NOT NULL,
+        machine_id   TEXT,
+        last_sync_at REAL,
+        revoked      INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE volume_presence (
+        volume_id  TEXT NOT NULL,
+        machine_id TEXT NOT NULL,
+        root       TEXT NOT NULL,
+        seen_at    REAL NOT NULL,
+        PRIMARY KEY (volume_id, machine_id)
+    );
+    -- Plan items carried out by an agent: which machine, and what it was asked to do.
+    ALTER TABLE plan_items ADD COLUMN relay_machine TEXT;
+    ALTER TABLE plan_items ADD COLUMN relay_request TEXT;  -- move | restore | purge (waiting for the agent)
+
+    -- Agent side: actions received from the hub, journaled like local plan items.
+    CREATE TABLE relayed_actions (
+        hub_item_id     INTEGER PRIMARY KEY,
+        kind            TEXT NOT NULL,                 -- move | restore | purge
+        plan_id         INTEGER NOT NULL,
+        volume_id       TEXT NOT NULL,
+        rel_path        TEXT NOT NULL,
+        rel_path_raw    BLOB,
+        content_hash    BLOB,
+        size            INTEGER NOT NULL,
+        mtime_ns        INTEGER NOT NULL,
+        quarantine_path TEXT,
+        status          TEXT NOT NULL,                 -- pending | moving | quarantined | restored | purged | skipped | failed
+        error           TEXT,
+        reported        INTEGER NOT NULL DEFAULT 0
     );
     """,
 }

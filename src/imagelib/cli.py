@@ -323,6 +323,63 @@ def cmd_plan(args) -> int:
     return 1
 
 
+def cmd_agent(args) -> int:
+    from . import sync
+
+    cat = open_catalog(args)
+    if args.agent_cmd == "add":
+        a = sync.add_agent(cat, args.name)
+        print(f"Agent '{args.name}' added. Its token (shown only once):\n\n  {a['token']}\n")
+        print("On the agent machine run:  imagelib hub connect <this hub's https address> <token>")
+        return 0
+    if args.agent_cmd == "list":
+        for a in sync.list_agents(cat):
+            seen = time.strftime("%Y-%m-%d %H:%M", time.localtime(a["last_sync_at"])) if a["last_sync_at"] else "never"
+            print(f"{a['name']:20} {a['machine'] or '?':16} last sync {seen}   drives: {', '.join(a['connected_volumes']) or '-'}")
+        return 0
+    return 1
+
+
+def cmd_hub(args) -> int:
+    from . import sync
+    from .previews import PreviewStore
+
+    cat = open_catalog(args)
+    if args.hub_cmd == "connect":
+        cfg = sync.load_hub(cat)
+        cfg.url, cfg.token = args.url, args.token
+        cfg.cf_client_id, cfg.cf_client_secret = args.cf_client_id or "", args.cf_client_secret or ""
+        sync.save_hub(cat, cfg)
+        print(f"This computer will send its scans to {args.url}. Run `imagelib hub sync` to sync now.")
+        return 0
+    if args.hub_cmd == "sync":
+        cfg = sync.load_hub(cat)
+        if not cfg.url:
+            print("Not connected to a hub. Use: imagelib hub connect <url> <token>")
+            return 1
+        sent = sync.sync_with_hub(cat, PreviewStore(cat.previews_path), sync.HubClient(cfg).post)
+        print(f"Sent {sent['files']:,} file changes, {sent['contents']:,} analyses, {sent['previews']:,} previews; "
+              f"carried out {sent['actions']:,} actions from the hub.")
+        return 0
+    return 1
+
+
+def cmd_bundle(args) -> int:
+    from . import sync
+    from .previews import PreviewStore
+
+    cat = open_catalog(args)
+    previews = PreviewStore(cat.previews_path)
+    if args.bundle_cmd == "export":
+        counts = sync.export_bundle(cat, previews, Path(args.file), full=args.full)
+        print(f"Wrote {args.file}: {counts['files']:,} file changes, {counts['contents']:,} analyses.")
+    else:
+        counts = sync.import_bundle(cat, previews, Path(args.file))
+        print(f"Imported {counts['files']:,} file changes, {counts['contents']:,} analyses, "
+              f"{counts['previews']:,} previews.")
+    return 0
+
+
 # -- GUI ------------------------------------------------------------------------
 
 def cmd_serve(args) -> int:
@@ -392,6 +449,33 @@ def build_parser() -> argparse.ArgumentParser:
     ppur.add_argument("id", type=int)
     ppur.add_argument("--confirm", default="", help='must be "delete"')
     ppur.set_defaults(func=cmd_plan)
+
+    agent = sub.add_parser("agent", help="(on the hub) let other computers send their scans here") \
+        .add_subparsers(dest="agent_cmd", required=True)
+    aadd = agent.add_parser("add", help="create a token for a new agent")
+    aadd.add_argument("name")
+    aadd.set_defaults(func=cmd_agent)
+    agent.add_parser("list", help="list agents").set_defaults(func=cmd_agent)
+
+    hub = sub.add_parser("hub", help="(on an agent) send this computer's scans to a hub") \
+        .add_subparsers(dest="hub_cmd", required=True)
+    hcon = hub.add_parser("connect", help="set the hub's address and this agent's token")
+    hcon.add_argument("url", help="the hub's https:// address (Tailscale or Cloudflare)")
+    hcon.add_argument("token")
+    hcon.add_argument("--cf-client-id", help="Cloudflare Access service token id, if the hub is behind Cloudflare")
+    hcon.add_argument("--cf-client-secret")
+    hcon.set_defaults(func=cmd_hub)
+    hub.add_parser("sync", help="sync with the hub now").set_defaults(func=cmd_hub)
+
+    bundle = sub.add_parser("bundle", help="carry scans between computers on a USB stick") \
+        .add_subparsers(dest="bundle_cmd", required=True)
+    bexp = bundle.add_parser("export", help="write changes since the last export to a file")
+    bexp.add_argument("file")
+    bexp.add_argument("--full", action="store_true", help="everything, not just changes")
+    bexp.set_defaults(func=cmd_bundle)
+    bimp = bundle.add_parser("import", help="merge a bundle from another computer")
+    bimp.add_argument("file")
+    bimp.set_defaults(func=cmd_bundle)
 
     sub.add_parser("relate", help="find thumbnails, resized and near-identical copies (resumable)") \
         .set_defaults(func=cmd_relate)

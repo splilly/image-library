@@ -22,10 +22,11 @@ design and roadmap (GUI, thumbnail review, quarantine, multi-machine hub).
 
 ## Status
 
-Milestones 1–5 of 7: the catalog and scanning engine, a command line interface, the
+Milestones 1–6 of 7: the catalog and scanning engine, a command line interface, the
 graphical interface (overview with live scan progress, drives, library browser, "find
 this image"), review screens for problem files, duplicates, thumbnails and
-near-identical images, and action plans that carry out decisions safely.
+near-identical images, action plans that carry out decisions safely, remote access,
+and several computers sharing one catalog (hub & agents). Packaging is milestone 7.
 
 ## The graphical interface
 
@@ -90,6 +91,26 @@ computer, set an app password and turn on one or both of:
 Remote devices need both the tunnel's login and the app password; requests that
 arrive any other way are refused. Remote-access settings and the password can only be
 changed on this computer, and signed-in devices can be signed out from Settings.
+
+## Several computers (hub & agents)
+
+Some drives can only be read by one computer (a Mac's APFS drive, a Linux ext4 disk).
+Run the app there too, as an **agent**: it scans the drives attached to it and sends
+what changed to the **hub**, where you browse, review and plan everything together.
+
+1. On the hub: Settings → Other computers → *Add agent* (or `imagelib agent add NAME`),
+   and copy the token.
+2. On the agent: Settings → *Send this computer's scans to a hub* with the hub's
+   Tailscale or Cloudflare address and the token (or `imagelib hub connect URL TOKEN`).
+   It syncs after every scan and every 5 minutes. Behind Cloudflare, also give it a
+   Cloudflare Access service token.
+3. No connection between them? `imagelib bundle export FILE` on the agent and
+   `imagelib bundle import FILE` on the hub (or the buttons in Settings).
+
+Plan items for drives connected to an agent are carried out by that agent on its next
+sync, after the hub's last-copy check; the agent re-checks each file before moving it.
+Restore and permanent deletion are relayed the same way. If two computers disagree
+about a file, the most recent change wins.
 
 ## Carrying out decisions (Actions)
 

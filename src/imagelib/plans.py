@@ -33,7 +33,7 @@ from .discover import mtime_equivalent, to_os_path
 from .review import VALID_DECISION
 from .volumes import QUARANTINE_DIR, VolumeRef
 
-ACTIVE = ("pending", "moving", "quarantined", "failed", "blocked")
+ACTIVE = ("pending", "moving", "quarantined", "failed", "blocked", "relayed")
 RUNNABLE = ("pending", "failed", "blocked")
 
 QUARANTINE_README = """Files in this folder were set aside by imagelib (Image Library) as duplicates,
@@ -317,8 +317,13 @@ def _write_readme(root: Path) -> None:
             pass
 
 
-def survivor_problem(conn: sqlite3.Connection, item, online: dict[str, Path], require_connected: bool) -> str | None:
-    """Why moving this file would lose the picture, or None if it is safe."""
+def survivor_problem(conn: sqlite3.Connection, item, online: dict[str, Path], require_connected: bool,
+                     trusted: frozenset[str] | set[str] = frozenset()) -> str | None:
+    """Why moving this file would lose the picture, or None if it is safe.
+
+    ``trusted`` volumes count as connected without a look on disk: drives an agent
+    reported connected moments ago, which this machine cannot see.
+    """
     h = item["content_hash"]
     if h is None:
         return None  # unreadable file: nothing to preserve
@@ -339,13 +344,16 @@ def survivor_problem(conn: sqlite3.Connection, item, online: dict[str, Path], re
                 WHERE f.content_hash = ? AND f.id != ? AND f.state != 'missing'
                 AND NOT EXISTS (SELECT 1 FROM decisions d WHERE {VALID_DECISION} AND d.decision = 'discard')
                 AND NOT EXISTS (SELECT 1 FROM plan_items i WHERE i.file_id = f.id
-                                AND i.status IN ('pending', 'moving', 'quarantined', 'failed', 'blocked'))""",
+                                AND i.status IN ('pending', 'moving', 'quarantined', 'failed', 'blocked',
+                                                 'relayed'))""",
             (v, item["file_id"])).fetchall()
     if not survivors:
         return "no other copy or version of this picture would be left"
     if not require_connected:
         return None
     for s in survivors:
+        if s["volume_id"] in trusted:
+            return None
         root = online.get(s["volume_id"])
         if root is None:
             continue
@@ -383,19 +391,37 @@ def _reconcile(cat: Catalog, plan_id: int, online: dict[str, Path]) -> None:
 
 # -- undo & purge ----------------------------------------------------------------------------
 
-def restore(cat: Catalog, plan_id: int, online: dict[str, Path], item_ids: list[int] | None = None) -> dict:
-    """Move quarantined files back and withdraw their discard decisions."""
+def _relay(conn: sqlite3.Connection, item, relay: dict[str, str], request: str) -> bool:
+    """Ask the agent holding this item's drive to do it; True if one does."""
+    machine = relay.get(item["volume_id"])
+    if machine is None:
+        return False
+    conn.execute("UPDATE plan_items SET relay_machine = ?, relay_request = ?, updated_at = ? WHERE id = ?",
+                 (machine, request, time.time(), item["id"]))
+    return True
+
+
+def restore(cat: Catalog, plan_id: int, online: dict[str, Path], item_ids: list[int] | None = None,
+            relay: dict[str, str] | None = None) -> dict:
+    """Move quarantined files back and withdraw their discard decisions.
+
+    Files on drives connected to an agent (``relay``: volume id -> machine id) are
+    restored by that agent on its next sync.
+    """
     conn = cat.conn
     sql = "SELECT * FROM plan_items WHERE plan_id = ? AND status = 'quarantined'"
     args: list = [plan_id]
     if item_ids is not None:
         sql += f" AND id IN ({','.join('?' * len(item_ids)) or 'NULL'})"
         args += item_ids
-    restored, problems = 0, []
+    restored, problems, relayed = 0, [], 0
     for item in conn.execute(sql, args).fetchall():
         root = online.get(item["volume_id"])
         if root is None:
-            problems.append(f"{item['rel_path']}: drive not connected")
+            if _relay(conn, item, relay or {}, "restore"):
+                relayed += 1
+            else:
+                problems.append(f"{item['rel_path']}: drive not connected")
             continue
         src = to_os_path(root, item["quarantine_path"], None)
         dst = to_os_path(root, item["rel_path"], item["rel_path_raw"])
@@ -415,19 +441,22 @@ def restore(cat: Catalog, plan_id: int, online: dict[str, Path], item_ids: list[
         bump_files_version(conn)
         conn.execute("COMMIT")
         restored += 1
-    return {"restored": restored, "problems": problems}
+    return {"restored": restored, "relayed": relayed, "problems": problems}
 
 
-def purge(cat: Catalog, plan_id: int, online: dict[str, Path]) -> dict:
-    """Permanently delete this plan's quarantined files on connected drives."""
+def purge(cat: Catalog, plan_id: int, online: dict[str, Path], relay: dict[str, str] | None = None) -> dict:
+    """Permanently delete this plan's quarantined files on connected drives (or ask their agent)."""
     conn = cat.conn
-    purged, freed, problems = 0, 0, []
+    purged, freed, problems, relayed = 0, 0, [], 0
     touched: set[tuple[str, str]] = set()
     for item in conn.execute("SELECT * FROM plan_items WHERE plan_id = ? AND status = 'quarantined'",
                              (plan_id,)).fetchall():
         root = online.get(item["volume_id"])
         if root is None:
-            problems.append(f"{item['rel_path']}: drive not connected")
+            if _relay(conn, item, relay or {}, "purge"):
+                relayed += 1
+            else:
+                problems.append(f"{item['rel_path']}: drive not connected")
             continue
         path = to_os_path(root, item["quarantine_path"], None)
         try:
@@ -447,7 +476,7 @@ def purge(cat: Catalog, plan_id: int, online: dict[str, Path]) -> dict:
         touched.add((str(root), item["volume_id"]))
     for root, _ in touched:
         _remove_empty_dirs(Path(to_os_path(Path(root), f"{QUARANTINE_DIR}/plan-{plan_id}", None)))
-    return {"purged": purged, "bytes": freed, "problems": problems}
+    return {"purged": purged, "bytes": freed, "relayed": relayed, "problems": problems}
 
 
 def _remove_empty_dirs(top: Path) -> None:

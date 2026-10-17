@@ -74,8 +74,9 @@ match to a larger image with the same aspect ratio. Outcome per thumbnail:
    thumbnail classification (incl. "not certain"), similar-image review.
 5. **Action plan (done)** — quarantine with per-file re-checks at execution time,
    journaled moves, restore, typed-confirmation purge, lists for read-only drives.
-6. **Hub/agent sync + remote access** — remote access to the GUI is done (see below);
-   LAN sync, bundle export/import and relayed actions remain.
+6. **Hub/agent sync + remote access (done)** — remote access to the GUI; agents sync
+   incrementally over Tailscale/Cloudflare with per-agent tokens, or via bundle files;
+   plan actions (move/restore/purge) relayed to the agent that holds the drive.
 7. **Packaging** — PyInstaller builds for all OSes via GitHub Actions; optional
    Organize/export of unique best originals into a date-based library.
 

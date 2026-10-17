@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api, type AuthStatus, type RemoteSettings, type RemoteState } from "../api";
 import { CopyButton, ErrorNote } from "../components/Bits";
 import { ago, useLoad } from "../util";
+import { Computers } from "./Computers";
 
 const lines = (v: string) => v.split(/[\s,]+/).map((x) => x.trim()).filter(Boolean);
 
@@ -66,6 +67,7 @@ function RemoteAccess() {
           </section>
         </>
       )}
+      <Computers />
     </div>
   );
 }

@@ -112,7 +112,8 @@ def test_drive_unplugged_during_analysis_pauses_and_resumes(drive, catalog, tmp_
     import imagelib.discover as discover
 
     conn = catalog.connect()
-    assert discover.discover(conn, vid, root, "", target.scan_id, lambda: False, lambda s: None)
+    assert discover.discover(conn, vid, root, "", target.scan_id, lambda: False, lambda s: None,
+                             target.present)
     conn.execute("UPDATE scans SET discovered=1 WHERE id=?", (target.scan_id,))
     unplugged = tmp_path / "elsewhere"
     root.rename(unplugged)
@@ -123,7 +124,8 @@ def test_drive_unplugged_during_analysis_pauses_and_resumes(drive, catalog, tmp_
     assert states == {"pending"}
 
     # "Plug it back in" at a different mount point: found by its marker and resumed.
-    found = volumes.locate_online({vid: str(unplugged)})
+    catalog.mark_volume_seen(vid, str(unplugged))
+    found = volumes.locate_online(catalog)
     assert found[vid] == unplugged
     prog = scan(catalog, unplugged, vid)
     assert prog.state == "done" and prog.files_done == 22

@@ -42,10 +42,9 @@ from pathlib import Path
 
 import blake3
 
-from . import analyze, discover, formats, sysmem
+from . import analyze, discover, formats, sysmem, volumes
 from .catalog import Catalog, to_signed64
 from .previews import PreviewStore
-from .volumes import marker_present
 
 GB = 1024 ** 3
 INLINE_LIMIT = 256 * 1024 * 1024     # files up to this size are read into memory once
@@ -64,6 +63,11 @@ class Target:
     root: Path
     subpath: str = ""
     scan_id: int = 0
+    ref: volumes.VolumeRef | None = None
+
+    def present(self) -> bool:
+        """Is this volume (not some other drive) still mounted at ``root``?"""
+        return self.ref.present_at(self.root)
 
 
 @dataclass
@@ -206,7 +210,8 @@ class Scanner:
                 "UPDATE files SET state='pending' WHERE volume_id=? AND state='done' AND content_hash IN "
                 "(SELECT hash FROM contents WHERE analyzer_version < ?)",
                 (volume_id, analyze.ANALYZER_VERSION))
-        return Target(volume_id, label, Path(root), subpath, scan_id)
+        ref = volumes.volume_ref(c, c.get_volume(volume_id))
+        return Target(volume_id, label, Path(root), subpath, scan_id, ref)
 
     def run(self, targets: list[Target]) -> dict[int, TargetProgress]:
         for t in targets:
@@ -255,7 +260,7 @@ class Scanner:
                     prog.discovered = stats.found
 
                 complete = discover.discover(conn, t.volume_id, t.root, t.subpath, t.scan_id,
-                                             self.stop_event.is_set, on_progress)
+                                             self.stop_event.is_set, on_progress, t.present)
                 if not complete:
                     self._post(_ReaderDone(t, "paused", "paused during discovery"))
                     return
@@ -314,7 +319,7 @@ class Scanner:
                 h = hasher.digest()
         except OSError as e:
             self.budget.release(reserve)
-            if not marker_present(t.root, t.volume_id):
+            if not t.present():
                 raise discover.VolumeOffline(str(e)) from e
             state = "missing" if isinstance(e, FileNotFoundError) else "read_error"
             self._post(_Failed(t, row["id"], size_hint, state, f"{type(e).__name__}: {e}"))

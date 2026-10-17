@@ -33,6 +33,7 @@ downloads with nothing to install.
 ```sh
 uv sync
 uv run imagelib volume add /mnt/e --label "WD 2TB blue sticker"   # once per drive
+uv run imagelib volume add /mnt/d --read-only   # never write to this drive (see below)
 uv run imagelib scan /mnt/e            # scan a drive (or a folder inside one)
 uv run imagelib scan                   # resume unfinished scans on connected drives
 uv run imagelib scan --all             # rescan every connected drive (unchanged files are skipped)
@@ -41,6 +42,12 @@ uv run imagelib status                 # totals, corrupt files, duplicate space
 uv run imagelib problems               # corrupt / suspicious files and where they are
 uv run imagelib where ~/Desktop/x.jpg  # which drive holds this image (or look-alikes)
 ```
+
+**Read-only drives.** Normally a drive gets a small `.imagelib-volume.json` marker
+at its root. With `--read-only` nothing is ever written to the drive; it is recognised
+by its filesystem serial number (the `XXXX-XXXX` Windows shows, which Linux also
+reports for exFAT/FAT/NTFS) plus its capacity. Reformatting changes that identity,
+and a cloned drive would share it, so prefer the marker where writing is acceptable.
 
 The catalog lives in `%LOCALAPPDATA%\imagelib`, `~/Library/Application Support/imagelib`
 or `~/.local/share/imagelib`; override with `--catalog DIR` or `IMAGELIB_HOME`.

@@ -22,7 +22,7 @@ import unicodedata
 import uuid
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -110,6 +110,21 @@ CREATE TABLE IF NOT EXISTS scans (
 CREATE INDEX IF NOT EXISTS scans_volume ON scans(volume_id, state);
 """
 
+# Incremental upgrades: version -> SQL taking the previous version to it.
+_MIGRATIONS = {
+    2: """
+    -- Read-only volumes have no marker file; they are recognised by filesystem fingerprints.
+    ALTER TABLE volumes ADD COLUMN read_only INTEGER NOT NULL DEFAULT 0;
+    CREATE TABLE volume_fingerprints (
+        kind      TEXT NOT NULL,                    -- serial32 | fs_uuid | mac_volume_uuid
+        value     TEXT NOT NULL,
+        volume_id TEXT NOT NULL REFERENCES volumes(id),
+        PRIMARY KEY (kind, value, volume_id)
+    );
+    CREATE INDEX volume_fingerprints_volume ON volume_fingerprints(volume_id);
+    """,
+}
+
 
 def path_key(rel_path: str) -> str:
     return unicodedata.normalize("NFC", rel_path).casefold()
@@ -174,9 +189,12 @@ class Catalog:
                 f"Catalog {self.db_path} was created by a newer version of imagelib "
                 f"(schema {version}, this build supports {SCHEMA_VERSION})."
             )
-        if version < SCHEMA_VERSION:
+        if version == 0:
             conn.executescript(_SCHEMA)
-            conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+            version = 1
+        while version < SCHEMA_VERSION:
+            version += 1
+            conn.executescript("BEGIN;" + _MIGRATIONS[version] + f"PRAGMA user_version={version}; COMMIT;")
 
     def _ensure_machine(self, conn: sqlite3.Connection) -> str:
         import platform
@@ -200,14 +218,34 @@ class Catalog:
     def list_volumes(self) -> list[sqlite3.Row]:
         return self.conn.execute("SELECT * FROM volumes ORDER BY label").fetchall()
 
-    def upsert_volume(self, volume_id: str, label: str, fs_type: str | None, total_bytes: int | None) -> None:
+    def upsert_volume(self, volume_id: str, label: str, fs_type: str | None, total_bytes: int | None,
+                      read_only: bool = False) -> None:
         now = time.time()
         self.conn.execute(
-            "INSERT INTO volumes(id, label, fs_type, total_bytes, created_at) VALUES(?,?,?,?,?) "
-            "ON CONFLICT(id) DO UPDATE SET label=excluded.label, "
+            "INSERT INTO volumes(id, label, fs_type, total_bytes, created_at, read_only) VALUES(?,?,?,?,?,?) "
+            "ON CONFLICT(id) DO UPDATE SET label=excluded.label, read_only=excluded.read_only, "
             "fs_type=coalesce(excluded.fs_type, fs_type), total_bytes=coalesce(excluded.total_bytes, total_bytes)",
-            (volume_id, label, fs_type, total_bytes, now),
+            (volume_id, label, fs_type, total_bytes, now, int(read_only)),
         )
+
+    def add_fingerprints(self, volume_id: str, fingerprints: set[tuple[str, str]]) -> None:
+        self.conn.executemany(
+            "INSERT OR IGNORE INTO volume_fingerprints(kind, value, volume_id) VALUES(?,?,?)",
+            [(kind, value, volume_id) for kind, value in fingerprints])
+
+    def fingerprints(self, volume_id: str) -> set[tuple[str, str]]:
+        return {(r[0], r[1]) for r in self.conn.execute(
+            "SELECT kind, value FROM volume_fingerprints WHERE volume_id=?", (volume_id,))}
+
+    def volumes_matching(self, ident) -> list[sqlite3.Row]:
+        """Read-only volumes whose fingerprints and capacity match an ``fsid.FsIdentity``."""
+        if not ident.fingerprints:
+            return []
+        rows = self.conn.execute(
+            "SELECT DISTINCT v.* FROM volumes v JOIN volume_fingerprints f ON f.volume_id=v.id "
+            f"WHERE v.read_only=1 AND ({' OR '.join('(f.kind=? AND f.value=?)' for _ in ident.fingerprints)})",
+            [x for fp in ident.fingerprints for x in fp]).fetchall()
+        return [r for r in rows if ident.matches(self.fingerprints(r["id"]), r["total_bytes"])]
 
     def mark_volume_seen(self, volume_id: str, mount_path: str) -> None:
         self.conn.execute(

@@ -16,7 +16,7 @@ from pathlib import Path
 
 from . import formats
 from .catalog import path_key
-from .volumes import MARKER_NAME, QUARANTINE_DIR, marker_present
+from .volumes import MARKER_NAME, QUARANTINE_DIR
 
 # Folders that never hold the user's photos. Thumbnail caches such as .thumbnails
 # or @eaDir are deliberately NOT skipped: finding those is part of the job.
@@ -146,8 +146,12 @@ class DiscoverStats:
 
 
 def discover(conn: sqlite3.Connection, volume_id: str, root: Path, subpath: str, scan_id: int,
-             should_stop: Callable[[], bool], on_progress: Callable[[DiscoverStats], None]) -> bool:
-    """Walk the volume, upserting files. Returns True if the walk completed."""
+             should_stop: Callable[[], bool], on_progress: Callable[[DiscoverStats], None],
+             present: Callable[[], bool]) -> bool:
+    """Walk the volume, upserting files. Returns True if the walk completed.
+
+    ``present`` reports whether the volume is still the one mounted at ``root``.
+    """
     register_functions(conn)
     stats = DiscoverStats()
     batch: list[tuple] = []
@@ -155,7 +159,7 @@ def discover(conn: sqlite3.Connection, volume_id: str, root: Path, subpath: str,
 
     def on_error(path: str, e: OSError) -> None:
         # An unplugged drive looks like a burst of errors; never record it as missing files.
-        if not marker_present(root, volume_id):
+        if not present():
             raise VolumeOffline(f"volume disappeared while reading {path}")
         stats.errors += 1
 
@@ -176,7 +180,7 @@ def discover(conn: sqlite3.Connection, volume_id: str, root: Path, subpath: str,
     flush()
     if should_stop():
         return False
-    if not marker_present(root, volume_id):
+    if not present():
         raise VolumeOffline("volume disappeared during the walk")
 
     prefix = subpath + "/" if subpath else ""

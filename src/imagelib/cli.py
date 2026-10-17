@@ -44,17 +44,37 @@ def open_catalog(args) -> Catalog:
 def cmd_volume_add(args) -> int:
     cat = open_catalog(args)
     root = Path(args.path)
+    if args.read_only:
+        return _volume_add_read_only(cat, root, args.label)
     label = args.label or (volumes.read_marker(root).label if volumes.read_marker(root) else None) \
         or root.resolve().name or str(root)
     try:
         marker = volumes.init_volume(root, label, cat.machine_id)
     except volumes.VolumeError as e:
         print(f"error: {e}", file=sys.stderr)
+        if root.exists() and not os.access(root, os.W_OK):
+            print("The drive is not writable. To catalog it without writing anything, use --read-only.",
+                  file=sys.stderr)
         return 1
     cat.upsert_volume(marker.id, marker.label, None, volumes.total_bytes(marker.root))
     cat.mark_volume_seen(marker.id, str(marker.root))
     print(f"Registered volume '{marker.label}' ({marker.id[:8]}) at {marker.root}")
     print(f"Scan it with:  imagelib scan \"{marker.root}\"")
+    return 0
+
+
+def _volume_add_read_only(cat: Catalog, path: Path, label: str | None) -> int:
+    try:
+        ref = volumes.register_read_only(cat, path, label)
+    except volumes.VolumeError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    root = cat.get_volume(ref.id)["last_seen_path"]
+    ids = ", ".join(f"{kind} {value}" for kind, value in sorted(ref.fingerprints))
+    print(f"Registered read-only volume '{ref.label}' ({ref.id[:8]}) at {root}")
+    print(f"Nothing was written to it. It is recognised by: {ids}, capacity {human_bytes(ref.total_bytes or 0)}.")
+    print("Note: reformatting the drive changes this identity; a cloned drive would share it.")
+    print(f"Scan it with:  imagelib scan \"{root}\"")
     return 0
 
 
@@ -64,13 +84,14 @@ def cmd_volume_list(args) -> int:
     if not vols:
         print("No volumes registered. Use: imagelib volume add <drive root> --label \"My drive\"")
         return 0
-    online = volumes.locate_online({v["id"]: v["last_seen_path"] for v in vols})
+    online = volumes.locate_online(cat)
     print(f"{'':2}{'LABEL':24} {'ID':9} {'FILES':>10} {'SIZE':>10} {'PENDING':>9}  LOCATION")
     for v in vols:
         st = cat.volume_stats(v["id"])
         where = str(online[v["id"]]) if v["id"] in online else \
             f"offline (last seen {time.strftime('%Y-%m-%d', time.localtime(v['last_seen_at'] or 0))})"
         dot = "●" if v["id"] in online else "○"
+        where += "  [read-only]" if v["read_only"] else ""
         print(f"{dot} {v['label'][:24]:24} {v['id'][:8]:9} {st['files']:>10,} {human_bytes(st['bytes']):>10} "
               f"{st['pending']:>9,}  {where}")
     return 0
@@ -114,19 +135,18 @@ def _resolve_targets(cat: Catalog, scanner: Scanner, args) -> list:
     if args.paths:
         for raw in args.paths:
             path = Path(raw).resolve()
-            marker = volumes.find_volume_root(path)
-            if marker is None:
+            found = volumes.resolve_path(cat, path)
+            if found is None:
                 raise SystemExit(f"error: {path} is not on a registered volume. Register the drive first:\n"
-                                 f"  imagelib volume add <drive root> --label \"Name\"")
-            if cat.get_volume(marker.id) is None:  # registered by another machine's catalog
-                cat.upsert_volume(marker.id, marker.label, None, volumes.total_bytes(marker.root))
-            sub = path.relative_to(marker.root).as_posix()
-            targets.append(scanner.prepare(marker.id, cat.get_volume(marker.id)["label"], marker.root,
-                                           "" if sub == "." else sub))
+                                 f"  imagelib volume add <drive root> --label \"Name\"\n"
+                                 f"  (add --read-only to catalog it without writing anything to it)")
+            ref, root = found
+            sub = path.relative_to(root).as_posix()
+            targets.append(scanner.prepare(ref.id, ref.label, root, "" if sub == "." else sub))
         return targets
 
     vols = {v["id"]: v for v in cat.list_volumes()}
-    online = volumes.locate_online({vid: v["last_seen_path"] for vid, v in vols.items()})
+    online = volumes.locate_online(cat)
     if args.all:
         for vid, root in online.items():
             targets.append(scanner.prepare(vid, vols[vid]["label"], root))
@@ -231,8 +251,7 @@ def cmd_where(args) -> int:
     if not found:
         print("Not found in the catalog.")
         return 1
-    vols = {v["id"]: v for v in cat.list_volumes()}
-    online = volumes.locate_online({vid: v["last_seen_path"] for vid, v in vols.items()})
+    online = volumes.locate_online(cat)
     for loc in found:
         match = "identical" if loc.exact else f"similar (distance {loc.distance})"
         status = f"online at {online[loc.volume_id]}" if loc.volume_id in online else "drive offline"
@@ -252,6 +271,9 @@ def build_parser() -> argparse.ArgumentParser:
     add = vol.add_parser("add", help="register a drive (writes a small marker file at its root)")
     add.add_argument("path")
     add.add_argument("--label", help="a name you will recognise, e.g. 'WD 2TB blue sticker'")
+    add.add_argument("--read-only", action="store_true",
+                     help="never write to this drive; recognise it by its filesystem serial number instead "
+                          "of a marker file")
     add.set_defaults(func=cmd_volume_add)
     vol.add_parser("list", help="list volumes and whether they are connected").set_defaults(func=cmd_volume_list)
 
@@ -280,5 +302,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     if sys.platform == "win32":
         os.system("")  # enable ANSI escape handling in the Windows console
+        import ctypes
+        # Probing empty card readers must not pop up "There is no disk in the drive" dialogs.
+        ctypes.windll.kernel32.SetErrorMode(0x0001 | 0x8000)
     args = build_parser().parse_args(argv)
     return args.func(args)

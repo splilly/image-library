@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import formats
-from .catalog import path_key
+from .catalog import bump_files_version, path_key
 from .volumes import MARKER_NAME, QUARANTINE_DIR
 
 # Folders that never hold the user's photos. Thumbnail caches such as .thumbnails
@@ -166,6 +166,7 @@ def discover(conn: sqlite3.Connection, volume_id: str, root: Path, subpath: str,
     def flush() -> None:
         if batch:
             conn.execute("BEGIN IMMEDIATE")
+            bump_files_version(conn)
             conn.executemany(_UPSERT, batch)
             conn.execute("COMMIT")
             batch.clear()
@@ -190,5 +191,6 @@ def discover(conn: sqlite3.Connection, volume_id: str, root: Path, subpath: str,
         (volume_id, scan_id, len(prefix), prefix),
     )
     stats.missing = cur.rowcount
+    bump_files_version(conn)
     on_progress(stats)
     return True

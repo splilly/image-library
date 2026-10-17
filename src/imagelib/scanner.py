@@ -43,7 +43,7 @@ from pathlib import Path
 import blake3
 
 from . import analyze, discover, formats, sysmem, volumes
-from .catalog import Catalog, to_signed64
+from .catalog import Catalog, bump_files_version, to_signed64
 from .previews import PreviewStore
 
 GB = 1024 ** 3
@@ -208,8 +208,7 @@ class Scanner:
                            (volume_id,))
             c.conn.execute(
                 "UPDATE files SET state='pending' WHERE volume_id=? AND state='done' AND content_hash IN "
-                "(SELECT hash FROM contents WHERE analyzer_version < ?)",
-                (volume_id, analyze.ANALYZER_VERSION))
+                f"(SELECT hash FROM contents WHERE {analyze.STALE_CONTENT})", (volume_id,))
         ref = volumes.volume_ref(c, c.get_volume(volume_id))
         return Target(volume_id, label, Path(root), subpath, scan_id, ref)
 
@@ -418,8 +417,8 @@ class Scanner:
 
     def _content_known(self, h: bytes) -> bool:
         row = self.catalog.conn.execute(
-            "SELECT analyzer_version FROM contents WHERE hash=?", (h,)).fetchone()
-        if row and row[0] >= analyze.ANALYZER_VERSION:
+            f"SELECT {analyze.STALE_CONTENT} FROM contents WHERE hash=?", (h,)).fetchone()
+        if row and not row[0]:
             self._known.add(h)
             return True
         return False
@@ -575,6 +574,7 @@ class Scanner:
         self._pending_previews = []
         conn = self.catalog.conn
         conn.execute("BEGIN IMMEDIATE")
+        bump_files_version(conn)
         for sql, args in self._pending_writes:
             conn.execute(sql, args)
             if self._crash_after is not None and sql.startswith("UPDATE files"):

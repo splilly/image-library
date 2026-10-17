@@ -22,9 +22,10 @@ design and roadmap (GUI, thumbnail review, quarantine, multi-machine hub).
 
 ## Status
 
-Milestones 1–2 of 7: the catalog and scanning engine, a command line interface, and
-the graphical interface (overview with live scan progress, drives, library browser,
-"find this image").
+Milestones 1–3 of 7: the catalog and scanning engine, a command line interface, the
+graphical interface (overview with live scan progress, drives, library browser, "find
+this image") and the review screens for problem files and duplicates. Decisions are
+recorded only; carrying them out (quarantine, undo) is milestone 5.
 
 ## The graphical interface
 
@@ -43,6 +44,19 @@ uv run imagelib gui                                # opens http://127.0.0.1:8765
   and its drive (with the path ready to copy), and look-alike images. Arrow keys step
   through results.
 * **Find image**: drop any photo to see which drives hold it or something like it.
+* **Review** (keyboard driven):
+  * *Problem files*: corrupt, suspicious and unreadable files with the reason, a
+    preview of what survives, and intact versions found elsewhere (same name, or
+    identical above the damaged area). `K` keep, `D` discard, `U` undo, arrows move.
+  * *Duplicates*: groups of identical files with a suggested copy to keep (not in a
+    backup/copy-like folder, oldest file date). `Enter` accepts, `1`–`9` keeps that
+    copy, or accept the suggestions for a whole page of groups at once.
+  * *Duplicate folders*: folders that share identical files (backups, re-imports);
+    keep one side and mark the other side's copies in one step.
+  * *Decisions*: what is marked, by reason and size, with undo.
+
+  Discarding every copy of an image that is not corrupt is refused. A decision only
+  applies to the content it was made on: if the file changes, it comes back for review.
 
 The server only listens on 127.0.0.1 and refuses requests from other sites. For GUI
 development run `uv run imagelib gui --no-browser` and `npm run dev` in `web/`.

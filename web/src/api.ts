@@ -97,6 +97,97 @@ export interface Location {
   state: string;
   read_only: boolean;
   online: boolean;
+  decision?: Decision | null;
+}
+
+export type Decision = "keep" | "discard";
+
+export interface ProblemItem {
+  file_id: number;
+  volume_id: string;
+  volume_label: string;
+  path: string;
+  size: number;
+  hash: string | null;
+  status: string;
+  problems: string | null;
+  has_preview: boolean;
+  width: number | null;
+  height: number | null;
+  format: string | null;
+  decision: Decision | null;
+}
+
+export interface IntactVersion extends ContentBrief {
+  distance: number | null;
+  top_difference: number | null;
+  why: string[];
+  locations: { file_id: number; volume_label: string; path: string }[];
+}
+
+export interface DupGroupBrief extends ContentBrief {
+  copies: number;
+  drives: number;
+  same_drive: boolean;
+  wasted: number;
+  decided: number;
+}
+
+export interface DupCopy {
+  file_id: number;
+  volume_id: string;
+  volume_label: string;
+  path: string;
+  online: boolean;
+  read_only: boolean;
+  mtime: number;
+  decision: Decision | null;
+}
+
+export interface DupGroup extends ContentBrief {
+  suggested_keep: number;
+  suggestion_reason: string;
+  copies: DupCopy[];
+}
+
+export interface FolderSide {
+  volume_id: string;
+  volume_label: string;
+  folder: string;
+  files: number;
+}
+
+export interface FolderPair {
+  a: FolderSide;
+  b: FolderSide;
+  shared: number;
+  bytes: number;
+}
+
+export interface DecisionSummary {
+  keep: { files: number; bytes: number };
+  discard: { files: number; bytes: number };
+  by_reason: { decision: Decision; reason: string; files: number; bytes: number }[];
+  stale: number;
+}
+
+export interface DecisionItem {
+  file_id: number;
+  volume_id: string;
+  volume_label: string;
+  path: string;
+  size: number;
+  hash: string | null;
+  decision: Decision;
+  reason: string;
+  decided_at: number;
+  status: string | null;
+  has_preview: boolean;
+}
+
+/** Error from the API; ``refused`` lists images a decision would have left without a copy. */
+export class ApiError extends Error {
+  refused?: { hash: string; status: string; copies: number; paths: string[] }[];
 }
 
 export interface ContentBrief {
@@ -175,13 +266,16 @@ async function request<T>(method: string, url: string, body?: unknown): Promise<
   }
   const res = await fetch(url, init);
   if (!res.ok) {
-    let detail = res.statusText;
+    let body: { detail?: unknown; refused?: ApiError["refused"] } = {};
     try {
-      detail = (await res.json()).detail ?? detail;
+      body = await res.json();
     } catch {
       /* not JSON */
     }
-    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+    const detail = body.detail ?? res.statusText;
+    const err = new ApiError(typeof detail === "string" ? detail : JSON.stringify(detail));
+    err.refused = body.refused;
+    throw err;
   }
   return res.json() as Promise<T>;
 }
@@ -221,6 +315,28 @@ export const api = {
     return request<{ matches: WhereMatch[] }>("POST", "/api/where", form);
   },
   fs: (path?: string) => request<FsListing>("GET", `/api/fs${qs({ path })}`),
+
+  decide: (file_ids: number[], decision: Decision | null, reason = "manual") =>
+    request<{ changed: number }>("POST", "/api/decisions", { file_ids, decision, reason }),
+  decisionSummary: () => request<DecisionSummary>("GET", "/api/decisions/summary"),
+  decisions: (decision?: Decision, after = 0) =>
+    request<{ items: DecisionItem[]; next: number | null }>("GET", `/api/decisions${qs({ decision, after })}`),
+  problems: (q: { status?: string; volume?: string; undecided?: boolean }, after = 0) =>
+    request<{ items: ProblemItem[]; next: number | null }>("GET", `/api/review/problems${qs({ ...q, after })}`),
+  intact: (hash: string) => request<IntactVersion[]>("GET", `/api/review/intact/${hash}`),
+  dupGroups: (q: { scope?: string; volume?: string; undecided?: boolean }, offset = 0, limit = 100) =>
+    request<{ items: DupGroupBrief[]; total: number; total_wasted: number }>(
+      "GET", `/api/review/duplicates${qs({ ...q, offset, limit })}`),
+  dupGroup: (hash: string) => request<DupGroup>("GET", `/api/review/duplicates/${hash}`),
+  applySuggestions: (hashes: string[]) =>
+    request<{ groups: number; discarded: number }>("POST", "/api/review/duplicates/apply-suggestions", { hashes }),
+  folderPairs: (volume?: string, offset = 0) =>
+    request<{ items: FolderPair[]; total: number }>("GET", `/api/review/folder-pairs${qs({ volume, offset })}`),
+  discardFolderCopies: (keep: FolderSide, discard: FolderSide) =>
+    request<{ discarded: number; kept: number }>("POST", "/api/review/folder-pairs/discard", {
+      keep_volume: keep.volume_id, keep_folder: keep.folder,
+      discard_volume: discard.volume_id, discard_folder: discard.folder,
+    }),
 };
 
 export const previewUrl = (hash: string, size: "s" | "m" = "s") => `/api/preview/${hash}?size=${size}`;

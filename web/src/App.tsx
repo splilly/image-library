@@ -2,12 +2,14 @@ import Dashboard from "./pages/Dashboard";
 import Drives from "./pages/Drives";
 import Find from "./pages/Find";
 import Library from "./pages/Library";
+import Review from "./pages/Review";
 import { Icon } from "./components/Icon";
 import { useRoute, useScanState } from "./util";
 
 const PAGES = [
   { id: "dashboard", label: "Overview", icon: "home" },
   { id: "library", label: "Library", icon: "grid" },
+  { id: "review", label: "Review", icon: "check" },
   { id: "drives", label: "Drives", icon: "drive" },
   { id: "find", label: "Find image", icon: "search" },
 ] as const;
@@ -37,6 +39,8 @@ export default function App() {
       <main className="main">
         {route.page === "library" ? (
           <Library params={route.params} />
+        ) : route.page === "review" ? (
+          <Review params={route.params} />
         ) : route.page === "drives" ? (
           <Drives scan={scan} />
         ) : route.page === "find" ? (

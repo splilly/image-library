@@ -214,3 +214,36 @@ def test_event_stream_delivers_scan_state_through_the_middleware(tmp_path):
     finally:
         server.should_exit = True
         thread.join(10)
+
+
+def test_review_endpoints(scanned):
+    api, vid, root, rel = scanned
+    files = {i["path"]: i for i in all_files(api)}
+    photo1, dup1 = files[rel["photo1"]], files[rel["dup1"]]
+
+    r = api.post("/api/decisions", json={"file_ids": [photo1["id"], dup1["id"]], "decision": "discard"})
+    assert r.status_code == 409 and r.json()["refused"][0]["copies"] == 2
+    assert api.post("/api/decisions", json={"file_ids": [dup1["id"]], "decision": "discard",
+                                            "reason": "duplicate"}).status_code == 200
+    detail = api.get(f"/api/contents/{photo1['hash']}").json()
+    assert {loc["path"]: loc["decision"] for loc in detail["locations"]} == {rel["photo1"]: None, rel["dup1"]: "discard"}
+    assert api.get("/api/decisions/summary").json()["discard"]["files"] == 1
+    assert api.post("/api/decisions", json={"file_ids": [dup1["id"]], "decision": None}).json() == {"changed": 1}
+
+    groups = api.get("/api/review/duplicates").json()
+    assert groups["total"] == 3
+    group = api.get(f"/api/review/duplicates/{groups['items'][0]['hash']}").json()
+    assert group["suggested_keep"] and all(c["online"] for c in group["copies"])
+    applied = api.post("/api/review/duplicates/apply-suggestions",
+                       json={"hashes": [g["hash"] for g in groups["items"]]}).json()
+    assert applied == {"groups": 3, "discarded": 3}
+    assert api.get("/api/review/duplicates", params={"undecided": True}).json()["total"] == 0
+
+    pairs = api.get("/api/review/folder-pairs").json()["items"]
+    assert pairs[0]["shared"] == 3
+    problems = api.get("/api/review/problems").json()["items"]
+    zeroed = next(p for p in problems if p["path"] == rel["zeroed"])
+    intact = api.get(f"/api/review/intact/{zeroed['hash']}").json()
+    assert intact[0]["locations"][0]["path"] == rel["photo4"]
+    listing = api.get("/api/decisions", params={"decision": "discard"}).json()["items"]
+    assert {i["path"] for i in listing} == {rel[f"dup{i}"] for i in (1, 2, 3)}

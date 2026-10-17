@@ -16,6 +16,7 @@ const PATHS: Record<string, string> = {
   external: "M14 4h6v6M20 4l-9 9M18 14v6H4V6h6",
   up: "M12 19V5M5 12l7-7 7 7",
   upload: "M12 16V4M6 10l6-6 6 6M4 20h16",
+  check: "M4 12l5 5L20 6",
 };
 
 export function Icon({ name, size = 18 }: { name: string; size?: number }) {

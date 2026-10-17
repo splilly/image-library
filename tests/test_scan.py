@@ -207,6 +207,8 @@ def test_content_from_an_older_analyzer_is_rechecked_on_the_next_scan(drive, cat
     zeroed = file_row(catalog, vid, rel["zeroed"])["content_hash"]
     # Pretend an older analyzer once passed this file.
     catalog.conn.execute("UPDATE contents SET analyzer_version=1, status='ok' WHERE hash=?", (zeroed,))
+    # A newer analyzer that only changed problem files re-reads nothing else.
+    catalog.conn.execute("UPDATE contents SET analyzer_version=2 WHERE hash!=? AND status='ok'", (zeroed,))
     prog = scan(catalog, root, vid)
     assert prog.files_total == 1
     assert file_row(catalog, vid, rel["zeroed"])["status"] == "corrupt"

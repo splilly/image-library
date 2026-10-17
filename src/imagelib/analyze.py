@@ -19,9 +19,15 @@ from PIL import Image, ImageFile
 
 from . import formats, phash
 
-# Bump when analysis changes in a way that makes re-analysis worthwhile.
-# 2: strict JPEG checking (libjpeg-turbo warnings), RAW sensor data actually unpacked.
-ANALYZER_VERSION = 2
+# Bump when analysis changes in a way that makes re-analysis worthwhile, and record in
+# STALE_CONTENT which existing results that change affects, so a bump re-reads only the
+# files that benefit instead of every file on every drive.
+#   2: strict JPEG checking (libjpeg-turbo warnings), RAW sensor data actually unpacked.
+#   3: perceptual hashes for damaged images, so intact originals can be found.
+#   4: JPEGs zero-padded after their end marker are no longer flagged as cut short.
+ANALYZER_VERSION = 4
+STALE_CONTENT = ("(analyzer_version < 2 OR (analyzer_version < 3 AND status != 'ok') "
+                 "OR (analyzer_version < 4 AND status = 'warning'))")
 
 SMALL_EDGE = 320
 MEDIUM_EDGE = 1024
@@ -280,8 +286,9 @@ def _analyze_jpeg(job: Job, result: Result) -> bool:
 
 
 def _check_jpeg_end(job: Job, result: Result) -> None:
-    # Some cameras append data after the end marker, so look near the end rather than at it.
-    if job.data is not None and b"\xff\xd9" not in job.data[-65536:]:
+    # Some cameras append data after the end marker, and some cameras and copy tools pad
+    # files with zeros (seen: 250 KB), so skip padding and look near the end, not at it.
+    if job.data is not None and b"\xff\xd9" not in job.data.rstrip(b"\x00")[-65536:]:
         result.flag(WARNING, "JPEG end-of-image marker missing; the file may be cut short")
 
 
@@ -292,11 +299,19 @@ def _render_damaged(job: Job, result: Result) -> None:
         with Image.open(_source(job)) as im:
             im.load()
             result.width, result.height = result.width or im.width, result.height or im.height
-            _make_previews(_prepare(im, _orientation(im)), result, job)
+            _hash_and_preview(_prepare(im, _orientation(im)), result, job)
     except Exception:
         pass
     finally:
         ImageFile.LOAD_TRUNCATED_IMAGES = False
+
+
+def _hash_and_preview(display: Image.Image, result: Result, job: Job) -> None:
+    """For damaged files: whatever could be rendered still gets hashes (to find intact
+    originals by likeness) and previews (to judge it by eye)."""
+    result.phash = phash.phash(display)
+    result.dhash = phash.dhash(display)
+    _make_previews(display, result, job)
 
 
 def _finish_still(img: Image.Image, result: Result, job: Job, orientation: int | None = None) -> None:
@@ -483,7 +498,7 @@ def _raw_preview_only(result: Result, job: Job) -> None:
         img.load()
         if flip in _FLIP_TO_TRANSPOSE:
             img = img.transpose(_FLIP_TO_TRANSPOSE[flip])
-        _make_previews(_prepare(img, None), result, job)
+        _hash_and_preview(_prepare(img, None), result, job)
     except Exception:
         pass
 

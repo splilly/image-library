@@ -66,9 +66,10 @@ match to a larger image with the same aspect ratio. Outcome per thumbnail:
 
 1. **Catalog + scanning engine (done)** — schema, drive registry, discovery,
    read-once analysis, resume, offline handling, crash isolation, CLI, sample library, tests.
-2. **API + GUI** — dashboard with live per-drive throughput/ETA, drives page, browse
+2. **API + GUI (done)** — dashboard with live per-drive throughput/ETA, drives page, browse
    and search with previews, drag-an-image-in "where is this?".
-3. **Corrupt review + exact duplicates review** — keyboard-driven grids.
+3. **Corrupt review + exact duplicates review (done)** — keyboard-driven review screens,
+   duplicate-folder pairs, decisions with last-copy protection.
 4. **Near-duplicates + thumbnail detection** — linking, classification, review.
 5. **Action plan** — quarantine, undo, purge, last-copy protection.
 6. **Hub/agent sync** — LAN sync, bundle export/import, relayed actions.

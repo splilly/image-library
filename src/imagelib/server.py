@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import analyze, discover, formats, queries, volumes
+from . import analyze, discover, formats, queries, review, volumes
 from .catalog import Catalog
 from .jobs import OnlineVolumes, ScanManager
 from .previews import PreviewStore
@@ -63,6 +63,23 @@ class AddVolume(BaseModel):
 class EditVolume(BaseModel):
     label: str | None = None
     notes: str | None = None
+
+
+class DecisionRequest(BaseModel):
+    file_ids: list[int]
+    decision: str | None          # keep | discard | None to clear
+    reason: str = "manual"
+
+
+class FolderDiscard(BaseModel):
+    keep_volume: str
+    keep_folder: str
+    discard_volume: str
+    discard_folder: str
+
+
+class HashList(BaseModel):
+    hashes: list[str]
 
 
 class ScanRequest(BaseModel):
@@ -255,8 +272,10 @@ def create_app(catalog_dir: Path, workers: int | None = None) -> FastAPI:
         if detail is None:
             raise HTTPException(404, "unknown content")
         up = online.get()
+        decided = review.file_decisions(c, [loc["file_id"] for loc in detail["locations"]])
         for loc in detail["locations"]:
             loc["online"] = loc["volume_id"] in up
+            loc["decision"] = decided.get(loc["file_id"])
         similar = []
         if detail["phash"] is not None:
             matches = phash_index.similar(c, detail["phash"], max_distance=8, limit=24, exclude=h)
@@ -293,6 +312,67 @@ def create_app(catalog_dir: Path, workers: int | None = None) -> FastAPI:
         if not os.path.isfile(path):
             raise HTTPException(404, "file not found on the drive")
         return FileResponse(path, media_type=mime)
+
+    # -- review & decisions ------------------------------------------------------
+
+    def refused(e: review.Refused):
+        return JSONResponse({"detail": str(e), "refused": e.details}, status_code=409)
+
+    @app.post("/api/decisions")
+    def set_decisions(req: DecisionRequest):
+        try:
+            return review.decide(cat(), req.file_ids, req.decision, req.reason)
+        except review.Refused as e:
+            return refused(e)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+    @app.get("/api/decisions/summary")
+    def decisions_summary():
+        return review.summary(cat())
+
+    @app.get("/api/decisions")
+    def decisions_list(decision: str | None = None, after: int = 0, limit: int = Query(200, le=1000)):
+        return review.list_decisions(cat(), decision, after, limit)
+
+    @app.get("/api/review/problems")
+    def review_problems(status: str | None = None, volume: str | None = None, undecided: bool = False,
+                        after: int = 0, limit: int = Query(200, le=1000)):
+        return review.problems(cat(), status or None, volume or None, undecided, after, limit)
+
+    @app.get("/api/review/intact/{hex_hash}")
+    def review_intact(hex_hash: str):
+        return review.intact_versions(cat(), previews(), phash_index, parse_hash(hex_hash))
+
+    @app.get("/api/review/duplicates")
+    def review_duplicates(scope: str = "any", volume: str | None = None, undecided: bool = False,
+                          offset: int = 0, limit: int = Query(100, le=500)):
+        return review.duplicate_groups(cat(), scope, volume or None, undecided, offset, limit)
+
+    @app.get("/api/review/duplicates/{hex_hash}")
+    def review_duplicate(hex_hash: str):
+        return review.duplicate_group(cat(), parse_hash(hex_hash), set(online.get()))
+
+    @app.post("/api/review/duplicates/apply-suggestions")
+    def review_apply(req: HashList):
+        try:
+            return review.apply_suggestions(cat(), [parse_hash(h) for h in req.hashes])
+        except review.Refused as e:
+            return refused(e)
+
+    @app.get("/api/review/folder-pairs")
+    def review_folder_pairs(volume: str | None = None, offset: int = 0, limit: int = Query(100, le=500)):
+        return review.folder_pairs(cat(), volume or None, offset, limit)
+
+    @app.post("/api/review/folder-pairs/discard")
+    def review_folder_discard(req: FolderDiscard):
+        try:
+            return review.discard_folder_duplicates(cat(), req.keep_volume, req.keep_folder,
+                                                    req.discard_volume, req.discard_folder)
+        except review.Refused as e:
+            return refused(e)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
 
     # -- "where is this image?" ------------------------------------------------
 

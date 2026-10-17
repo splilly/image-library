@@ -22,7 +22,7 @@ import unicodedata
 import uuid
 from pathlib import Path
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -128,7 +128,49 @@ _MIGRATIONS = {
     CREATE INDEX contents_taken ON contents(taken_at);
     CREATE INDEX contents_camera ON contents(camera_model);
     """,
+    4: """
+    -- Review decisions. Only valid while the file still has the content it was decided on.
+    CREATE TABLE decisions (
+        file_id      INTEGER PRIMARY KEY REFERENCES files(id),
+        content_hash BLOB,                          -- files.content_hash when decided (NULL: unreadable file)
+        decision     TEXT NOT NULL,                 -- keep | discard
+        reason       TEXT NOT NULL,                 -- problem | duplicate | folder | manual
+        decided_at   REAL NOT NULL,
+        machine_id   TEXT NOT NULL
+    );
+    CREATE INDEX decisions_decision ON decisions(decision);
+
+    -- Derived duplicate data, rebuilt when meta.files_version moves past meta.dup_version.
+    CREATE TABLE dup_groups (
+        hash         BLOB PRIMARY KEY,
+        copies       INTEGER NOT NULL,
+        drives       INTEGER NOT NULL,
+        max_per_drive INTEGER NOT NULL,             -- >1 means redundant copies on one drive
+        size         INTEGER NOT NULL
+    );
+    CREATE INDEX dup_groups_wasted ON dup_groups((copies - 1) * size);
+    CREATE TABLE dup_folder_pairs (
+        a_volume TEXT NOT NULL, a_folder TEXT NOT NULL,
+        b_volume TEXT NOT NULL, b_folder TEXT NOT NULL,
+        shared   INTEGER NOT NULL,
+        bytes    INTEGER NOT NULL
+    );
+    CREATE INDEX dup_folder_pairs_shared ON dup_folder_pairs(shared);
+    INSERT OR IGNORE INTO meta(key, value) VALUES ('files_version', '0'), ('dup_version', '-1');
+
+    -- File name (lower-cased, without folders): find the same photo under another path.
+    CREATE INDEX files_name ON files(lower(substr(rel_path, length(rtrim(rel_path, replace(rel_path, '/', ''))) + 1)));
+    """,
 }
+
+
+def bump_files_version(conn: sqlite3.Connection) -> None:
+    """Mark derived data (duplicate groups) stale. Call once per batch that changes files."""
+    conn.execute("UPDATE meta SET value = CAST(value AS INTEGER) + 1 WHERE key = 'files_version'")
+
+
+# Must match the files_name index expression exactly for SQLite to use the index.
+NAME_EXPR = "lower(substr({t}.rel_path, length(rtrim({t}.rel_path, replace({t}.rel_path, '/', ''))) + 1))"
 
 
 def path_key(rel_path: str) -> str:

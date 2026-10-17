@@ -100,6 +100,11 @@ export function DetailPanel({ file, volumes, onClose, onOpenHash }: {
                   <div>
                     <strong>{loc.volume_label}</strong>
                     {loc.state === "missing" && <span className="badge badge-missing">Missing</span>}
+                    {loc.decision && (
+                      <span className={`decision decision-${loc.decision}`}>
+                        {loc.decision === "keep" ? "Keep" : "Discard"}
+                      </span>
+                    )}
                     <div className="loc-path" title={full}>{loc.path}</div>
                   </div>
                   <CopyButton text={full} />

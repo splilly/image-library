@@ -20,7 +20,8 @@ from PIL import Image, ImageFile
 from . import formats, phash
 
 # Bump when analysis changes in a way that makes re-analysis worthwhile.
-ANALYZER_VERSION = 1
+# 2: strict JPEG checking (libjpeg-turbo warnings), RAW sensor data actually unpacked.
+ANALYZER_VERSION = 2
 
 SMALL_EDGE = 320
 MEDIUM_EDGE = 1024
@@ -115,13 +116,19 @@ class DecodeGate:
             self._sem.release()
 
 
-def init_worker(gate: DecodeGate | None = None) -> None:
+def init_worker(gate: DecodeGate | None = None, log_path: str | None = None) -> None:
     """Per-process setup; safe to call more than once."""
     global _initialized, _gate
     if gate is not None:
         _gate = gate
     if _initialized:
         return
+    if log_path:
+        # C libraries (LibRaw, libjpeg) print diagnostics straight to stderr, which would
+        # scramble the progress display. Keep them, and any worker traceback, in a log.
+        fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+        os.dup2(fd, 2)
+        os.close(fd)
     import signal
 
     import exiv2
@@ -211,7 +218,12 @@ def _whole_bytes(job: Job) -> bytes:
 
 # -- still images ------------------------------------------------------------
 
+_JPEG_EXTS = frozenset({"jpg", "jpeg", "jpe", "jfif"})
+
+
 def _analyze_image(job: Job, result: Result) -> None:
+    if job.ext in _JPEG_EXTS and _analyze_jpeg(job, result):
+        return
     try:
         im = Image.open(_source(job))
     except Image.DecompressionBombError:
@@ -231,6 +243,40 @@ def _analyze_image(job: Job, result: Result) -> None:
         if im.format == "JPEG":
             _check_jpeg_end(job, result)
         _finish_still(im, result, job, _orientation(im))
+
+
+def _analyze_jpeg(job: Job, result: Result) -> bool:
+    """Strict JPEG check with libjpeg-turbo. Returns False to fall back to Pillow.
+
+    Pillow silently repairs damaged entropy-coded data (zeroed or overwritten
+    blocks); libjpeg only reports it as a warning, which strict mode turns into an
+    error. Decoding at a reduced DCT scale still reads every byte of image data, so
+    the check stays complete while the decode is several times cheaper.
+    """
+    import simplejpeg
+
+    data = _whole_bytes(job)
+    try:
+        height, width, colorspace, _ = simplejpeg.decode_jpeg_header(data)
+    except ValueError:
+        return False  # not a baseline/progressive JPEG libjpeg-turbo understands; let Pillow judge
+    if colorspace not in ("YCbCr", "Gray", "RGB"):
+        return False  # CMYK / YCCK (old Photoshop files): Pillow handles the conversion
+    result.format = "JPEG"
+    orientation = result.orientation
+    result.width, result.height = (height, width) if orientation in (5, 6, 7, 8) else (width, height)
+    wide = width >= height
+    try:
+        pixels = simplejpeg.decode_jpeg(data, colorspace="RGB", strict=True,
+                                        min_width=MEDIUM_EDGE if wide else 0,
+                                        min_height=0 if wide else MEDIUM_EDGE)
+    except ValueError as e:
+        result.flag(CORRUPT, f"JPEG data damaged: {e}")
+        _render_damaged(job, result)
+        return True
+    _check_jpeg_end(job, result)
+    _finish_still(Image.fromarray(pixels), result, job, orientation)
+    return True
 
 
 def _check_jpeg_end(job: Job, result: Result) -> None:
@@ -370,7 +416,7 @@ def _analyze_raw(job: Job, result: Result) -> None:
 
     result.format = job.ext.upper()
     try:
-        raw = rawpy.imread(_source(job))  # opens and unpacks (decompresses) the sensor data
+        raw = rawpy.imread(_source(job))  # reads the header only
     except rawpy.LibRawFileUnsupportedError:
         if _looks_like_raw(job):
             result.flag(UNSUPPORTED, "RAW variant not supported by LibRaw")
@@ -381,6 +427,17 @@ def _analyze_raw(job: Job, result: Result) -> None:
         result.flag(CORRUPT, f"RAW data could not be decoded: {e}")
         return
     with raw:
+        # rawpy opens lazily; unpacking decompresses all sensor data, which is the integrity check.
+        try:
+            raw.unpack()
+        except rawpy.LibRawIOError:
+            result.flag(CORRUPT, "RAW sensor data ends early (file is cut short)")
+            _raw_preview_only(result, job)
+            return
+        except rawpy.LibRawError as e:
+            result.flag(CORRUPT, f"RAW sensor data is damaged: {e}")
+            _raw_preview_only(result, job)
+            return
         flip = raw.sizes.flip
         w, h = raw.sizes.width, raw.sizes.height
         result.width, result.height = (h, w) if flip in (5, 6) else (w, h)
@@ -406,6 +463,29 @@ def _analyze_raw(job: Job, result: Result) -> None:
                 result.flag(CORRUPT, f"RAW could not be rendered: {e}")
                 return
         _finish_still(img, result, job)
+
+
+def _raw_preview_only(result: Result, job: Job) -> None:
+    """For damaged RAWs, show the embedded preview (if intact) so the file can be judged by eye.
+
+    A fresh LibRaw instance is needed: one whose unpack failed is left unusable.
+    """
+    import rawpy
+
+    try:
+        with rawpy.imread(_source(job)) as raw:
+            w, h = raw.sizes.width, raw.sizes.height
+            flip = raw.sizes.flip
+            thumb = raw.extract_thumb()
+        result.width, result.height = (h, w) if flip in (5, 6) else (w, h)
+        img = Image.open(io.BytesIO(thumb.data)) if thumb.format == rawpy.ThumbFormat.JPEG \
+            else Image.fromarray(thumb.data)
+        img.load()
+        if flip in _FLIP_TO_TRANSPOSE:
+            img = img.transpose(_FLIP_TO_TRANSPOSE[flip])
+        _make_previews(_prepare(img, None), result, job)
+    except Exception:
+        pass
 
 
 # Leading bytes of the containers camera RAW formats are built on.

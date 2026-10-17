@@ -336,7 +336,7 @@ class Scanner:
         # A fresh gate per pool: a killed worker may have died holding reservations.
         gate = analyze.DecodeGate(ctx, int(self.total_memory * 0.4))
         return ProcessPoolExecutor(max_workers=self.workers, initializer=analyze.init_worker,
-                                   initargs=(gate,), mp_context=ctx)
+                                   initargs=(gate, str(self.catalog.dir / "worker.log")), mp_context=ctx)
 
     def _dispatch_loop(self, targets: list[Target]) -> None:
         last_commit = last_progress = time.monotonic()

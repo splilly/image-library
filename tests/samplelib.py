@@ -79,6 +79,9 @@ def build(root: Path) -> dict[str, Path]:
     p["truncated"] = root / "broken/IMG_trunc.jpg"
     p["truncated"].parent.mkdir(parents=True, exist_ok=True)
     p["truncated"].write_bytes(good[: len(good) * 6 // 10])
+    mid = len(good) // 2  # a block of zeros, as left by a bad sector or failed copy
+    p["zeroed"] = root / "broken/IMG_zeroed.jpg"
+    p["zeroed"].write_bytes(good[:mid] + b"\0" * 4096 + good[mid + 4096:])
     p["empty"] = root / "broken/empty.jpg"
     p["empty"].write_bytes(b"")
     p["garbage_raw"] = root / "broken/IMG_9999.CR2"

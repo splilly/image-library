@@ -20,11 +20,13 @@ def test_full_scan_classifies_everything(drive, catalog):
     prog = scan(catalog, root, vid)
 
     assert prog.state == "done"
-    assert prog.files_total == 21  # trash folder and non-media ignored
-    assert prog.files_done == 21
+    assert prog.files_total == 22  # trash folder and non-media ignored
+    assert prog.files_done == 22
 
     status = {name: file_row(catalog, vid, path)["status"] for name, path in rel.items()}
     assert status["truncated"] == "corrupt"
+    assert status["zeroed"] == "corrupt"  # Pillow alone silently "repairs" this one
+    assert file_row(catalog, vid, rel["zeroed"])["has_preview"] == 1  # still reviewable by eye
     assert status["empty"] == "corrupt"
     assert status["garbage_raw"] == "corrupt"
     assert status["grey_band"] == "warning"
@@ -124,7 +126,7 @@ def test_drive_unplugged_during_analysis_pauses_and_resumes(drive, catalog, tmp_
     found = volumes.locate_online({vid: str(unplugged)})
     assert found[vid] == unplugged
     prog = scan(catalog, unplugged, vid)
-    assert prog.state == "done" and prog.files_done == 21
+    assert prog.state == "done" and prog.files_done == 22
     assert catalog.conn.execute("SELECT count(*) FROM scans").fetchone()[0] == 1  # same scan resumed
 
 
@@ -142,13 +144,13 @@ def test_crash_mid_scan_resumes_without_losing_or_repeating_work(drive, tmp_path
 
     cat = Catalog(tmp_path / "cat")
     done_before = cat.conn.execute("SELECT count(*) FROM files WHERE state='done'").fetchone()[0]
-    assert 5 <= done_before < 21
+    assert 5 <= done_before < 22
     cat.close()
 
     resumed = subprocess.run(cli + ["scan"], env=env, capture_output=True, text=True)  # no args = resume
     assert resumed.returncode == 0, resumed.stdout + resumed.stderr
     cat = Catalog(tmp_path / "cat")
-    assert cat.conn.execute("SELECT count(*) FROM files WHERE state='done'").fetchone()[0] == 21
+    assert cat.conn.execute("SELECT count(*) FROM files WHERE state='done'").fetchone()[0] == 22
     assert cat.conn.execute("SELECT count(*) FROM scans WHERE state='done'").fetchone()[0] == 1
     cat.close()
 
@@ -163,7 +165,7 @@ def test_decoder_crash_is_isolated_to_the_guilty_file(drive, catalog):
     assert row["status"] == "corrupt" and "crashed" in row["problems"]
     # Neighbours that shared the broken pool were retried, not blamed.
     assert catalog.conn.execute(
-        "SELECT count(*) FROM contents WHERE status='corrupt'").fetchone()[0] == 4
+        "SELECT count(*) FROM contents WHERE status='corrupt'").fetchone()[0] == 5
 
 
 def test_decoder_hang_is_killed_and_reported(drive, catalog):
@@ -176,7 +178,7 @@ def test_decoder_hang_is_killed_and_reported(drive, catalog):
     assert time.monotonic() - started < 60
     row = file_row(catalog, vid, "photos/2004/IMG_hang.jpg")
     assert row["status"] == "corrupt" and "hung" in row["problems"]
-    assert catalog.conn.execute("SELECT count(*) FROM files WHERE state='done'").fetchone()[0] == 22
+    assert catalog.conn.execute("SELECT count(*) FROM files WHERE state='done'").fetchone()[0] == 23
 
 
 def test_where_finds_exact_copies_and_lookalikes(drive, catalog, tmp_path):

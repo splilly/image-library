@@ -306,3 +306,16 @@ def test_month_filter(scanned):
     months = api.get("/api/facets", params={"year": "2004"}).json()["months"]
     assert months == [{"name": "07", "count": 9}]  # unique pictures with a July 2004 date
     assert api.get("/api/facets", params={"year": "1999"}).json()["months"] == []
+
+
+def test_unknown_year_shows_pictures_without_a_date(scanned):
+    api, vid, root, rel = scanned
+    undated = {i["path"] for i in all_files(api, year="unknown")}
+    assert rel["png"] in undated and rel["heic"] in undated and rel["orphan_thumb"] in undated
+    assert rel["photo1"] not in undated
+    assert all(not i["taken_at"] for i in all_files(api, year="unknown"))
+    dated = sum(y["count"] for y in api.get("/api/facets").json()["years"] if y["name"] != "unknown")
+    unknown = next(y for y in api.get("/api/facets").json()["years"] if y["name"] == "unknown")
+    assert dated + unknown["count"] == api.get("/api/summary").json()["unique_contents"]
+    assert api.get("/api/facets", params={"year": "unknown"}).json()["months"] == []
+    assert api.get("/api/files", params={"year": "20x4"}).status_code == 422

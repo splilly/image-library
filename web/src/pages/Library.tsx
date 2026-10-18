@@ -178,11 +178,16 @@ export default function Library({ params }: { params: URLSearchParams }) {
             <option value="">Any camera</option>
             {facets.data?.cameras.map((c) => <option key={c.name} value={c.name}>{c.name} ({count(c.count)})</option>)}
           </select>
-          <select value={query.year ?? ""} onChange={(e) => setParam({ year: e.target.value || undefined })}>
+          <select value={query.year ?? ""} aria-label="Year"
+            onChange={(e) => setParam({ year: e.target.value || undefined,
+                                        month: e.target.value === "unknown" ? undefined : query.month })}>
             <option value="">Any year</option>
-            {facets.data?.years.map((y) => <option key={y.name} value={y.name}>{y.name} ({count(y.count)})</option>)}
+            {facets.data?.years.map((y) => (
+              <option key={y.name} value={y.name}>{y.name === "unknown" ? "Unknown" : y.name} ({count(y.count)})</option>
+            ))}
           </select>
-          <select value={query.month ?? ""} onChange={(e) => setParam({ month: e.target.value || undefined })}
+          <select value={query.year === "unknown" ? "" : query.month ?? ""} disabled={query.year === "unknown"}
+            onChange={(e) => setParam({ month: e.target.value || undefined })}
             aria-label="Month" title={query.year ? `Months of ${query.year}` : "This month in any year"}>
             <option value="">Any month</option>
             {MONTHS.map((name, i) => {

@@ -35,7 +35,7 @@ class FileFilter:
                                   # | read_error | pending | missing
     kind: str | None = None
     camera: str | None = None
-    year: str | None = None
+    year: str | None = None       # "2004", or UNKNOWN_YEAR for pictures without a usable date
     month: str | None = None      # "01".."12"; with a year that month of that year, alone that month of any year
     text: str | None = None       # substring of the path
     unique: bool = False          # one row per unique content
@@ -76,7 +76,10 @@ class FileFilter:
         if self.camera:
             clauses.append("c.camera_model = ?")
             args.append(self.camera)
-        if self.year and self.month:
+        if self.year == UNKNOWN_YEAR:
+            # Analysed, but no usable date (not merely not scanned yet).
+            clauses.append(f"c.hash IS NOT NULL AND NOT coalesce(c.taken_at GLOB '{DATED}', 0)")
+        elif self.year and self.month:
             y, m = int(self.year), int(self.month)
             clauses.append("c.taken_at >= ? AND c.taken_at < ?")
             args += [f"{y:04d}-{m:02d}", f"{y + m // 12:04d}-{m % 12 + 1:02d}"]
@@ -95,6 +98,9 @@ class FileFilter:
                            "WHERE f3.content_hash = f.content_hash AND f3.state != 'missing'))")
         return " AND ".join(clauses) or "1", args
 
+
+UNKNOWN_YEAR = "unknown"
+DATED = "[12][0-9][0-9][0-9]*"   # taken_at values that start with a year
 
 _SELECT = """
 SELECT f.id, f.volume_id, f.rel_path, f.size, f.kind, f.state, f.error, f.content_hash,
@@ -174,17 +180,20 @@ def facets(cat: Catalog, year: str | None = None) -> dict:
     month_sql = ("SELECT substr(taken_at, 6, 2) AS m, count(*) FROM contents "
                  "WHERE taken_at GLOB '[12][0-9][0-9][0-9]-[01][0-9]*'")
     month_args: list = []
-    if year:  # months of the selected year only
+    if year == UNKNOWN_YEAR:
+        month_sql += " AND 0"  # no dates, no months
+    elif year:  # months of the selected year only
         month_sql += " AND taken_at >= ? AND taken_at < ?"
         month_args = [year, str(int(year) + 1)]
+    undated = c.execute(f"SELECT count(*) FROM contents WHERE NOT coalesce(taken_at GLOB '{DATED}', 0)").fetchone()[0]
     return {
         "months": [{"name": r[0], "count": r[1]} for r in c.execute(month_sql + " GROUP BY m ORDER BY m", month_args)],
         "cameras": [{"name": r[0], "count": r[1]} for r in c.execute(
             "SELECT camera_model, count(*) FROM contents WHERE camera_model IS NOT NULL "
             "GROUP BY camera_model ORDER BY count(*) DESC")],
         "years": [{"name": r[0], "count": r[1]} for r in c.execute(
-            "SELECT substr(taken_at, 1, 4) AS y, count(*) FROM contents WHERE taken_at GLOB '[12][0-9][0-9][0-9]*' "
-            "GROUP BY y ORDER BY y")],
+            f"SELECT substr(taken_at, 1, 4) AS y, count(*) FROM contents WHERE taken_at GLOB '{DATED}' "
+            "GROUP BY y ORDER BY y")] + ([{"name": UNKNOWN_YEAR, "count": undated}] if undated else []),
         "kinds": [{"name": r[0], "count": r[1]} for r in c.execute(
             "SELECT kind, count(*) FROM files WHERE state != 'missing' GROUP BY kind ORDER BY count(*) DESC")],
     }

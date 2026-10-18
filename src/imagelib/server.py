@@ -378,6 +378,7 @@ def create_app(catalog_dir: Path, workers: int | None = None, auto_relate: bool 
                    year: str | None = None, q: str | None = None, unique: bool = False,
                    sort: str = "path", cursor: str | None = None, limit: int = Query(200, le=1000),
                    month: str | None = Query(None, pattern=r"^(0?[1-9]|1[0-2])$")):
+        year = _valid_year(year)
         flt = file_filter(volume, folder, recursive, status, kind, camera, year, q, unique, month)
         return queries.list_files(cat(), flt, sort, cursor, limit)
 
@@ -386,7 +387,7 @@ def create_app(catalog_dir: Path, workers: int | None = None, auto_relate: bool 
                     status: str | None = None, kind: str | None = None, camera: str | None = None,
                     year: str | None = None, q: str | None = None, unique: bool = False,
                     month: str | None = Query(None, pattern=r"^(0?[1-9]|1[0-2])$")):
-        flt = file_filter(volume, folder, recursive, status, kind, camera, year, q, unique, month)
+        flt = file_filter(volume, folder, recursive, status, kind, camera, _valid_year(year), q, unique, month)
         return queries.count_files(cat(), flt)
 
     @app.get("/api/folders")
@@ -394,8 +395,13 @@ def create_app(catalog_dir: Path, workers: int | None = None, auto_relate: bool 
         return queries.folders(cat(), volume, folder)
 
     @app.get("/api/facets")
-    def facets(year: str | None = Query(None, pattern=r"^[12][0-9]{3}$")):
-        return queries.facets(cat(), year)
+    def facets(year: str | None = None):
+        return queries.facets(cat(), _valid_year(year))
+
+    def _valid_year(year: str | None) -> str | None:
+        if year and year != queries.UNKNOWN_YEAR and not (len(year) == 4 and year.isdigit()):
+            raise HTTPException(422, "year must be like 2004, or 'unknown'")
+        return year or None
 
     def parse_hash(hex_hash: str) -> bytes:
         try:

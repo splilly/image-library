@@ -57,6 +57,7 @@ h3 { font-size: 13px; margin: 16px 0 8px; text-transform: uppercase; letter-spac
 button, input, select { font: inherit; color: inherit; }
 .icon { flex: none; vertical-align: -3px; }
 .muted { color: var(--muted); }
+.dim { opacity: 0.45; }
 .small { font-size: 12px; }
 .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
 .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }

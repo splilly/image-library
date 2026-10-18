@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { VirtuosoGrid } from "react-virtuoso";
-import { api, previewUrl, type FileItem, type LibraryQuery, type Volume } from "../api";
+import { api, previewUrl, type FacetCount, type FileItem, type LibraryQuery, type Volume } from "../api";
 import { ErrorNote, OnlineDot } from "../components/Bits";
 import { DetailPanel } from "../components/DetailPanel";
 import { Icon } from "../components/Icon";
@@ -25,7 +25,15 @@ const SORTS: [string, string][] = [
   ["size_desc", "Largest first"],
 ];
 const KIND_LABEL: Record<string, string> = { image: "Images", raw: "RAW", psd: "Photoshop", video: "Videos" };
-const PARAMS = ["volume", "folder", "status", "kind", "camera", "year", "month", "q", "sort", "unique", "flat"] as const;
+// Pixel size of the longer side (album art is typically 300-600 px, icons and sprites smaller).
+const SIZES: [string, string][] = [
+  ["normal", "800 px or larger"],
+  ["large", "1600 px or larger"],
+  ["small", "Smaller than 800 px"],
+  ["tiny", "Smaller than 256 px"],
+];
+const PARAMS = ["volume", "folder", "status", "kind", "camera", "year", "month", "q", "sort", "unique", "flat",
+  "size"] as const;
 const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October",
   "November", "December"];
 
@@ -41,9 +49,14 @@ export default function Library({ params }: { params: URLSearchParams }) {
     month: params.get("month") || undefined,
     q: params.get("q") || undefined,
     unique: params.get("unique") === "1",
+    size: params.get("size") || undefined,
     sort: params.get("sort") || "path",
   }), [params]);
   const queryKey = JSON.stringify(query);
+  const filterKey = JSON.stringify({ ...query, sort: undefined });
+  // Filters besides the drive and folder (those are what the sidebar picks).
+  const filtering = !!(query.status || query.kind || query.camera || query.year || query.month || query.q ||
+    query.unique || query.size);
 
   const setParam = useCallback((changes: Partial<Record<(typeof PARAMS)[number], string | undefined>>) => {
     const next: Record<string, string | undefined> = {};
@@ -53,8 +66,10 @@ export default function Library({ params }: { params: URLSearchParams }) {
 
   const vols = useLoad(() => api.volumes(), []);
   const volumes = useMemo(() => new Map((vols.data ?? []).map((v) => [v.id, v])), [vols.data]);
-  const facets = useLoad(() => api.facets(query.year), [query.year]);
-  const total = useLoad(() => api.count(query), [queryKey]);
+  const facets = useLoad(() => api.facets(query), [filterKey]);
+  const total = useLoad(() => api.count(query), [filterKey]);
+  const volumeCounts = useMemo(() => new Map((facets.data?.volumes ?? []).map((v) => [v.name, v.count])),
+    [facets.data]);
 
   // Search box: type freely, the query follows after a pause. The box also follows the URL
   // (links, back button), and only text the user typed is ever pushed back into it.
@@ -147,11 +162,18 @@ export default function Library({ params }: { params: URLSearchParams }) {
             <button className={`side-item ${query.volume === v.id && !query.folder ? "active" : ""}`}
               onClick={() => setParam({ volume: v.id, folder: undefined })}>
               <OnlineDot online={v.online} /> <span className="grow">{v.label}</span>
-              <span className="muted small">{count(v.stats.files)}</span>
+              {filtering && facets.data ? (
+                <span className={`muted small ${volumeCounts.get(v.id) ? "" : "dim"}`}
+                  title={`${count(volumeCounts.get(v.id) ?? 0)} of ${count(v.stats.files)} files match the filters`}>
+                  {count(volumeCounts.get(v.id) ?? 0)}
+                </span>
+              ) : (
+                <span className="muted small">{count(v.stats.files)}</span>
+              )}
             </button>
             {query.volume === v.id && (
               <FolderTree volume={v} folder="" selected={query.folder ?? ""} depth={1}
-                onSelect={(f) => setParam({ folder: f || undefined })} />
+                filters={filtering ? query : undefined} onSelect={(f) => setParam({ folder: f || undefined })} />
             )}
           </div>
         ))}
@@ -170,19 +192,19 @@ export default function Library({ params }: { params: URLSearchParams }) {
           </select>
           <select value={query.kind ?? ""} onChange={(e) => setParam({ kind: e.target.value || undefined })}>
             <option value="">All types</option>
-            {facets.data?.kinds.map((k) => (
+            {withChosen(facets.data?.kinds, query.kind).map((k) => (
               <option key={k.name} value={k.name}>{KIND_LABEL[k.name] ?? k.name} ({count(k.count)})</option>
             ))}
           </select>
           <select value={query.camera ?? ""} onChange={(e) => setParam({ camera: e.target.value || undefined })}>
             <option value="">Any camera</option>
-            {facets.data?.cameras.map((c) => <option key={c.name} value={c.name}>{c.name} ({count(c.count)})</option>)}
+            {withChosen(facets.data?.cameras, query.camera).map((c) => <option key={c.name} value={c.name}>{c.name} ({count(c.count)})</option>)}
           </select>
           <select value={query.year ?? ""} aria-label="Year"
             onChange={(e) => setParam({ year: e.target.value || undefined,
                                         month: e.target.value === "unknown" ? undefined : query.month })}>
             <option value="">Any year</option>
-            {facets.data?.years.map((y) => (
+            {withChosen(facets.data?.years, query.year).map((y) => (
               <option key={y.name} value={y.name}>{y.name === "unknown" ? "Unknown" : y.name} ({count(y.count)})</option>
             ))}
           </select>
@@ -193,7 +215,24 @@ export default function Library({ params }: { params: URLSearchParams }) {
             {MONTHS.map((name, i) => {
               const value = String(i + 1).padStart(2, "0");
               const n = facets.data?.months.find((m) => m.name === value)?.count;
-              return <option key={value} value={value} disabled={facets.data ? !n : false}>{name}{n ? ` (${count(n)})` : ""}</option>;
+              return (
+                <option key={value} value={value} disabled={facets.data ? !n && query.month !== value : false}>
+                  {name}{facets.data ? ` (${count(n ?? 0)})` : ""}
+                </option>
+              );
+            })}
+          </select>
+          <select value={query.size ?? ""} aria-label="Size"
+            title="Pixel size of the longer side: hide icons, sprites and album art by choosing 800 px or larger"
+            onChange={(e) => setParam({ size: e.target.value || undefined })}>
+            <option value="">Any size</option>
+            {SIZES.map(([value, label]) => {
+              const n = facets.data?.sizes.find((z) => z.name === value)?.count;
+              return (
+                <option key={value} value={value} disabled={facets.data ? !n && query.size !== value : false}>
+                  {label}{facets.data ? ` (${count(n ?? 0)})` : ""}
+                </option>
+              );
             })}
           </select>
           <select value={query.sort} onChange={(e) => setParam({ sort: e.target.value === "path" ? undefined : e.target.value })}>
@@ -270,23 +309,26 @@ function Cell({ item, volume, selected, onClick }: {
   );
 }
 
-function FolderTree({ volume, folder, selected, depth, onSelect }: {
-  volume: Volume; folder: string; selected: string; depth: number; onSelect: (f: string) => void;
+/** ``filters``: the library's other filters while any are set; folders then show how many files match. */
+function FolderTree({ volume, folder, selected, depth, filters, onSelect }: {
+  volume: Volume; folder: string; selected: string; depth: number; filters?: LibraryQuery;
+  onSelect: (f: string) => void;
 }) {
-  const { data } = useLoad(() => api.folders(volume.id, folder), [volume.id, folder]);
+  const filterKey = JSON.stringify(filters ? { ...filters, volume: undefined, folder: undefined, sort: undefined } : null);
+  const { data } = useLoad(() => api.folders(volume.id, folder, filters), [volume.id, folder, filterKey]);
   return (
     <ul className="tree">
       {data?.map((f) => (
-        <TreeNode key={f.path} volume={volume} name={f.name} path={f.path} files={f.files} selected={selected}
-          depth={depth} onSelect={onSelect} />
+        <TreeNode key={f.path} volume={volume} name={f.name} path={f.path} files={f.files} matches={f.matches}
+          selected={selected} depth={depth} filters={filters} onSelect={onSelect} />
       ))}
     </ul>
   );
 }
 
-function TreeNode({ volume, name, path, files, selected, depth, onSelect }: {
-  volume: Volume; name: string; path: string; files: number; selected: string; depth: number;
-  onSelect: (f: string) => void;
+function TreeNode({ volume, name, path, files, matches, selected, depth, filters, onSelect }: {
+  volume: Volume; name: string; path: string; files: number; matches?: number; selected: string; depth: number;
+  filters?: LibraryQuery; onSelect: (f: string) => void;
 }) {
   const onPath = selected === path || selected.startsWith(path + "/");
   const [open, setOpen] = useState(onPath);
@@ -299,10 +341,24 @@ function TreeNode({ volume, name, path, files, selected, depth, onSelect }: {
         </button>
         <button className="tree-label" onClick={() => onSelect(path)}>
           <span className="grow">{name}</span>
-          <span className="muted small">{count(files)}</span>
+          {matches === undefined ? (
+            <span className="muted small">{count(files)}</span>
+          ) : (
+            <span className={`muted small ${matches ? "" : "dim"}`}
+              title={`${count(matches)} of ${count(files)} files match the filters`}>{count(matches)}</span>
+          )}
         </button>
       </div>
-      {open && <FolderTree volume={volume} folder={path} selected={selected} depth={depth + 1} onSelect={onSelect} />}
+      {open && (
+        <FolderTree volume={volume} folder={path} selected={selected} depth={depth + 1} filters={filters}
+          onSelect={onSelect} />
+      )}
     </li>
   );
+}
+
+/** Filter options, keeping the chosen one listed even when the other filters leave it nothing to show. */
+function withChosen(options: FacetCount[] | undefined, chosen: string | undefined): FacetCount[] {
+  const list = options ?? [];
+  return chosen && !list.some((o) => o.name === chosen) ? [...list, { name: chosen, count: 0 }] : list;
 }

@@ -9,7 +9,7 @@ from __future__ import annotations
 import base64
 import json
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -39,9 +39,12 @@ class FileFilter:
     month: str | None = None      # "01".."12"; with a year that month of that year, alone that month of any year
     text: str | None = None       # substring of the path
     unique: bool = False          # one row per unique content
+    size: str | None = None       # a SIZES key: pixel size of the longer side
 
-    def where(self) -> tuple[str, list]:
-        clauses, args = [], []
+    def path_clauses(self) -> tuple[list[str], list]:
+        """The conditions on where a file is and what it is called (need only the files table)."""
+        clauses: list[str] = []
+        args: list = []
         if self.volume_id:
             clauses.append("f.volume_id = ?")
             args.append(self.volume_id)
@@ -55,6 +58,14 @@ class FileFilter:
                 args.append(len(prefix) + 1)
         elif self.volume_id and not self.recursive:
             clauses.append("instr(f.rel_path, '/') = 0")
+        if self.text:
+            clauses.append("f.rel_path LIKE ? ESCAPE '\\'")
+            escaped = self.text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            args.append(f"%{escaped}%")
+        return clauses, args
+
+    def where(self) -> tuple[str, list]:
+        clauses, args = self.path_clauses()
         status = self.status
         if status in ("read_error", "pending", "missing"):
             clauses.append("f.state = ?")
@@ -89,10 +100,10 @@ class FileFilter:
         elif self.month:
             clauses.append("c.taken_at GLOB '[12][0-9][0-9][0-9]-*' AND substr(c.taken_at, 6, 2) = ?")
             args.append(f"{int(self.month):02d}")
-        if self.text:
-            clauses.append("f.rel_path LIKE ? ESCAPE '\\'")
-            escaped = self.text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            args.append(f"%{escaped}%")
+        if self.size in SIZES:
+            low, high = SIZES[self.size]
+            clauses.append(f"{LONG_SIDE} >= ?" + (f" AND {LONG_SIDE} < ?" if high else ""))
+            args += [low, high] if high else [low]
         if self.unique:
             clauses.append("(f.content_hash IS NULL OR f.id = (SELECT min(f3.id) FROM files f3 "
                            "WHERE f3.content_hash = f.content_hash AND f3.state != 'missing'))")
@@ -101,6 +112,14 @@ class FileFilter:
 
 UNKNOWN_YEAR = "unknown"
 DATED = "[12][0-9][0-9][0-9]*"   # taken_at values that start with a year
+LONG_SIDE = "max(c.width, c.height)"  # NULL when the size is not known (not scanned, unreadable)
+# size filter -> pixels on the longer side, [low, high); high None = no upper limit
+SIZES: dict[str, tuple[int, int | None]] = {
+    "large": (1600, None),
+    "normal": (800, None),     # hides icons, sprites and most album art
+    "small": (1, 800),
+    "tiny": (1, 256),
+}
 
 _SELECT = """
 SELECT f.id, f.volume_id, f.rel_path, f.size, f.kind, f.state, f.error, f.content_hash,
@@ -159,44 +178,259 @@ def count_files(cat: Catalog, flt: FileFilter) -> dict:
     return {"files": row[0], "bytes": row[1]}
 
 
-def folders(cat: Catalog, volume_id: str, folder: str = "") -> list[dict]:
-    """Immediate sub-folders of ``folder`` with recursive file counts."""
+def folders(cat: Catalog, volume_id: str, folder: str = "", flt: FileFilter | None = None,
+            index: FacetIndex | None = None) -> list[dict]:
+    """Immediate sub-folders of ``folder`` with recursive file counts.
+
+    With other filters active (``flt``, counted with ``index``), each folder also gets
+    ``matches``: how many of its files those filters show.
+    """
     prefix = folder.rstrip("/") + "/" if folder else ""
     start = len(prefix) + 1
-    args: list = [start, start, volume_id]
-    sql = ("SELECT substr(rel_path, ?, instr(substr(rel_path, ?), '/') - 1) AS name, count(*) AS files, "
-           "sum(size) AS bytes FROM files WHERE volume_id = ? AND state != 'missing'")
-    if prefix:
-        sql += " AND rel_path >= ? AND rel_path < ?"
-        args += [prefix, prefix[:-1] + "0"]
-    sql += " AND instr(substr(rel_path, ?), '/') > 0 GROUP BY name ORDER BY name COLLATE NOCASE"
-    args.append(start)
-    return [{"name": r["name"], "path": prefix + r["name"], "files": r["files"], "bytes": r["bytes"]}
-            for r in cat.conn.execute(sql, args)]
+    name = "substr(rel_path, ?, instr(substr(rel_path, ?), '/') - 1)"
+    where = "volume_id = ? AND state != 'missing'" + (" AND rel_path >= ? AND rel_path < ?" if prefix else "") \
+        + " AND instr(substr(rel_path, ?), '/') > 0"
+    args = [start, start, volume_id] + ([prefix, prefix[:-1] + "0"] if prefix else []) + [start]
+    others = replace(flt, volume_id=None, folder="", recursive=True) if flt else FileFilter()
+    if others == FileFilter() or index is None:
+        sql = f"SELECT {name} AS name, count(*), sum(size) FROM files WHERE {where} GROUP BY name"
+        rows = [(r[0], r[1], r[2], None) for r in cat.conn.execute(sql, args)]
+    else:
+        conn = cat.conn
+        old, conn.row_factory = conn.row_factory, None
+        try:
+            listed = conn.execute(f"SELECT id, {name}, size FROM files WHERE {where}", args).fetchall()
+        finally:
+            conn.row_factory = old
+        ids = np.fromiter((r[0] for r in listed), dtype=np.int64, count=len(listed))
+        shown = np.isin(ids, index.matching_ids(cat, others))
+        totals: dict[str, list[int]] = {}
+        for (_, child, size), hit in zip(listed, shown.tolist()):
+            t = totals.setdefault(child, [0, 0, 0])
+            t[0] += 1
+            t[1] += size
+            t[2] += hit
+        rows = [(k, v[0], v[1], v[2]) for k, v in totals.items()]
+    out = []
+    for child, files, size, matches in sorted(rows, key=lambda r: r[0].casefold()):
+        f = {"name": child, "path": prefix + child, "files": files, "bytes": size}
+        if matches is not None:
+            f["matches"] = matches
+        out.append(f)
+    return out
 
 
-def facets(cat: Catalog, year: str | None = None) -> dict:
-    c = cat.conn
-    month_sql = ("SELECT substr(taken_at, 6, 2) AS m, count(*) FROM contents "
-                 "WHERE taken_at GLOB '[12][0-9][0-9][0-9]-[01][0-9]*'")
-    month_args: list = []
-    if year == UNKNOWN_YEAR:
-        month_sql += " AND 0"  # no dates, no months
-    elif year:  # months of the selected year only
-        month_sql += " AND taken_at >= ? AND taken_at < ?"
-        month_args = [year, str(int(year) + 1)]
-    undated = c.execute(f"SELECT count(*) FROM contents WHERE NOT coalesce(taken_at GLOB '{DATED}', 0)").fetchone()[0]
-    return {
-        "months": [{"name": r[0], "count": r[1]} for r in c.execute(month_sql + " GROUP BY m ORDER BY m", month_args)],
-        "cameras": [{"name": r[0], "count": r[1]} for r in c.execute(
-            "SELECT camera_model, count(*) FROM contents WHERE camera_model IS NOT NULL "
-            "GROUP BY camera_model ORDER BY count(*) DESC")],
-        "years": [{"name": r[0], "count": r[1]} for r in c.execute(
-            f"SELECT substr(taken_at, 1, 4) AS y, count(*) FROM contents WHERE taken_at GLOB '{DATED}' "
-            "GROUP BY y ORDER BY y")] + ([{"name": UNKNOWN_YEAR, "count": undated}] if undated else []),
-        "kinds": [{"name": r[0], "count": r[1]} for r in c.execute(
-            "SELECT kind, count(*) FROM files WHERE state != 'missing' GROUP BY kind ORDER BY count(*) DESC")],
-    }
+# facet -> the FileFilter fields it sets (left out when counting that facet's own options)
+_FACET_FIELDS = {
+    "volumes": ("volume_id", "folder"),
+    "kinds": ("kind",),
+    "cameras": ("camera",),
+    "years": ("year",),
+    "months": ("month",),
+    "sizes": ("size",),
+}
+_SIZE_STEPS = (1, 256, 800, 1600)  # lower bounds of the size buckets; every SIZES range is a run of them
+_NO_CONTENT, _UNDATED = -2, -1     # year codes for files not analysed yet, and analysed without a date
+
+# One row per file, read in content order (much faster than in file order).
+_FACET_ROWS = f"""
+SELECT f.id, f.volume_id, f.kind, f.state, c.rowid, c.status, c.camera_model,
+       CASE WHEN c.taken_at GLOB '{DATED}' THEN CAST(substr(c.taken_at, 1, 4) AS INTEGER)
+            WHEN c.hash IS NOT NULL THEN {_UNDATED} ELSE {_NO_CONTENT} END,
+       CASE WHEN c.taken_at GLOB '[12][0-9][0-9][0-9]-[01][0-9]*' THEN CAST(substr(c.taken_at, 6, 2) AS INTEGER)
+            ELSE 0 END,
+       {LONG_SIDE}
+FROM files f INDEXED BY files_hash LEFT JOIN contents c ON c.hash = f.content_hash
+"""
+
+
+class _Codes:
+    """Strings as small integers (None = -1), for counting with numpy."""
+
+    def __init__(self, values):
+        index: dict = {}
+        codes = [-1 if v is None else index.setdefault(v, len(index)) for v in values]
+        self.names = list(index)
+        self.index = index
+        self.codes = np.array(codes, dtype=np.int32)
+
+    def code(self, name) -> int:
+        return self.index.get(name, -2)  # -2 matches nothing
+
+
+class _FacetData:
+    def __init__(self, rows: list):
+        cols = list(zip(*rows)) if rows else [()] * 10
+        self.ids = np.array(cols[0], dtype=np.int64)
+        self.volume = _Codes(cols[1])
+        self.kind = _Codes(cols[2])
+        self.state = _Codes(cols[3])
+        content = np.array([-1 if c is None else c for c in cols[4]], dtype=np.int64)
+        self.status = _Codes(cols[5])
+        self.camera = _Codes(cols[6])
+        self.year = np.array(cols[7], dtype=np.int32)
+        self.month = np.array(cols[8], dtype=np.int8)
+        side = np.array([0 if v is None else v for v in cols[9]], dtype=np.int64)
+        self.bucket = np.searchsorted(np.array(_SIZE_STEPS), side, side="right").astype(np.int8) - 1  # -1: unknown
+        self.present = self.state.codes != self.state.code("missing")
+        # Copies per content (present files only), and the first present file of each content.
+        has = self.present & (content >= 0)
+        self.duplicated = np.zeros(len(self.ids), dtype=bool)
+        self.first = ~(content >= 0)  # files without content always show
+        if has.any():
+            idx = np.nonzero(has)[0]
+            order = idx[np.lexsort((self.ids[idx], content[idx]))]
+            keys = content[order]
+            starts = np.r_[True, keys[1:] != keys[:-1]]
+            self.first[order[starts]] = True
+            counts = np.diff(np.r_[np.nonzero(starts)[0], len(order)])
+            self.duplicated[order] = np.repeat(counts, counts) > 1
+
+    def rows_with_ids(self, ids: list[int]) -> np.ndarray:
+        return np.isin(self.ids, np.array(ids, dtype=np.int64))
+
+    def mask(self, flt: FileFilter, paths: np.ndarray | None) -> np.ndarray:
+        """Rows ``flt`` shows; must agree with FileFilter.where (the tests compare the two)."""
+        m = np.ones(len(self.ids), dtype=bool) if paths is None else paths.copy()
+        if flt.volume_id:
+            m &= self.volume.codes == self.volume.code(flt.volume_id)
+        status = flt.status
+        if status in ("read_error", "pending", "missing"):
+            m &= self.state.codes == self.state.code(status)
+        else:
+            m &= self.present
+            if status == "duplicates":
+                m &= self.duplicated
+            elif status == "problems":
+                m &= np.isin(self.status.codes, [self.status.code(s) for s in PROBLEM_STATUSES]) | \
+                    (self.state.codes == self.state.code("read_error"))
+            elif status:
+                m &= self.status.codes == self.status.code(status)
+        if flt.kind:
+            m &= self.kind.codes == self.kind.code(flt.kind)
+        if flt.camera:
+            m &= self.camera.codes == self.camera.code(flt.camera)
+        if flt.year == UNKNOWN_YEAR:
+            m &= self.year == _UNDATED
+        elif flt.year:
+            m &= self.year == int(flt.year)
+        if flt.month and flt.year != UNKNOWN_YEAR:
+            m &= self.month == int(flt.month)
+            if not flt.year:
+                m &= self.year >= 0
+        if flt.size in SIZES:
+            low, high = SIZES[flt.size]
+            m &= self.bucket >= _SIZE_STEPS.index(low)
+            if high:
+                m &= self.bucket < _SIZE_STEPS.index(high)
+        if flt.unique:
+            m &= self.first
+        return m
+
+
+class FacetIndex:
+    """Per-file filter values held in memory, so every filter's counts take milliseconds.
+
+    Loading takes seconds for a million files, so after the first load a changed catalog
+    (a scan running) is reloaded in the background while the previous values keep serving.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._stamp = None
+        self._data: _FacetData | None = None
+        self._reloading = False
+
+    @staticmethod
+    def _stamp_of(cat: Catalog):
+        return cat.conn.execute("SELECT value FROM meta WHERE key = 'files_version'").fetchone()[0]
+
+    def _load(self, cat: Catalog) -> None:
+        stamp = self._stamp_of(cat)
+        conn = cat.conn
+        old, conn.row_factory = conn.row_factory, None
+        try:
+            data = _FacetData(conn.execute(_FACET_ROWS).fetchall())
+        finally:
+            conn.row_factory = old
+        self._data, self._stamp = data, stamp
+
+    def _reload_in_background(self, cat: Catalog) -> None:
+        def run():
+            try:
+                self._load(cat)
+            finally:
+                self._reloading = False
+
+        self._reloading = True
+        threading.Thread(target=run, name="facet-index", daemon=True).start()
+
+    def _current(self, cat: Catalog) -> _FacetData:
+        with self._lock:
+            if self._data is None:
+                self._load(cat)
+            elif not self._reloading and self._stamp_of(cat) != self._stamp:
+                self._reload_in_background(cat)
+            return self._data
+
+    @staticmethod
+    def _path_rows(cat: Catalog, d: _FacetData, f: FileFilter) -> np.ndarray | None:
+        """Rows the folder and name search allow (looked up in the catalog), None = all."""
+        if not (f.folder or f.text or (f.volume_id and not f.recursive)):
+            return None  # the drive alone is one of the in-memory values
+        clauses, args = f.path_clauses()
+        sql = f"SELECT f.id FROM files f WHERE {' AND '.join(clauses)}"
+        return d.rows_with_ids([r[0] for r in cat.conn.execute(sql, args)])
+
+    def matching_ids(self, cat: Catalog, flt: FileFilter) -> np.ndarray:
+        """Ids of the files ``flt`` shows."""
+        d = self._current(cat)
+        return d.ids[d.mask(flt, self._path_rows(cat, d, flt))]
+
+    def facets(self, cat: Catalog, flt: FileFilter | None = None) -> dict:
+        """How many files each filter option would show, given all the *other* filters in ``flt``."""
+        flt = flt or FileFilter()
+        d = self._current(cat)
+
+        def path_rows(f: FileFilter) -> np.ndarray | None:
+            return self._path_rows(cat, d, f)
+
+        paths = path_rows(flt)
+        masks = {}
+        for facet, fields in _FACET_FIELDS.items():
+            cleared = {name: None for name in fields}
+            if "folder" in fields:
+                cleared["folder"] = ""
+            other = replace(flt, **cleared)
+            masks[facet] = d.mask(other, path_rows(other) if "folder" in fields else paths)
+
+        def tally(codes: np.ndarray, m: np.ndarray, offset: int = 0) -> dict[int, int]:
+            picked = codes[m].astype(np.int64) + offset
+            picked = picked[picked >= 0]
+            counts = np.bincount(picked) if len(picked) else np.zeros(0, dtype=np.int64)
+            return {i - offset: int(n) for i, n in enumerate(counts) if n}
+
+        def by_name(codes: _Codes, m: np.ndarray) -> dict:
+            return {codes.names[i]: n for i, n in tally(codes.codes, m).items()}
+
+        years = tally(d.year, masks["years"] & (d.year != _NO_CONTENT), offset=1)
+        months = tally(d.month.astype(np.int32), masks["months"] & (d.year >= 0))
+        buckets = tally(d.bucket.astype(np.int32), masks["sizes"])
+        sizes = {}
+        for name, (low, high) in SIZES.items():
+            sizes[name] = sum(n for b, n in buckets.items()
+                              if _SIZE_STEPS[b] >= low and (high is None or _SIZE_STEPS[b] < high))
+        desc = lambda kv: (-kv[1], kv[0])  # noqa: E731
+        return {
+            "volumes": [{"name": k, "count": v} for k, v in sorted(by_name(d.volume, masks["volumes"]).items())],
+            "kinds": [{"name": k, "count": v} for k, v in sorted(by_name(d.kind, masks["kinds"]).items(), key=desc)],
+            "cameras": [{"name": k, "count": v}
+                        for k, v in sorted(by_name(d.camera, masks["cameras"]).items(), key=desc)],
+            "years": [{"name": str(y), "count": n} for y, n in sorted(years.items()) if y >= 0]
+                     + ([{"name": UNKNOWN_YEAR, "count": years[_UNDATED]}] if years.get(_UNDATED) else []),
+            "months": [{"name": f"{m:02d}", "count": n} for m, n in sorted(months.items()) if m > 0],
+            "sizes": [{"name": k, "count": v} for k, v in sizes.items()],
+        }
 
 
 def content_detail(cat: Catalog, content_hash: bytes) -> dict | None:

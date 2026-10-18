@@ -96,6 +96,8 @@ def test_folders_and_facets(scanned):
     sub = api.get("/api/folders", params={"volume": vid, "folder": "photos/2004"}).json()
     assert [f["name"] for f in sub] == [".thumbnails"]
     facets = api.get("/api/facets").json()
+    assert {"name": "Canon EOS 10D", "count": 12} in facets["cameras"]  # files: 9 pictures, 3 with a copy
+    facets = api.get("/api/facets", params={"unique": "1"}).json()
     assert {"name": "Canon EOS 10D", "count": 9} in facets["cameras"]  # 6 photos + 3 damaged copies
 
 
@@ -303,7 +305,7 @@ def test_month_filter(scanned):
     assert all_files(api, month="08") == [] and all_files(api, year="2005", month="07") == []
     assert api.get("/api/files/count", params={"month": "07"}).json()["files"] == len(july)
     assert api.get("/api/files", params={"month": "13"}).status_code == 422
-    months = api.get("/api/facets", params={"year": "2004"}).json()["months"]
+    months = api.get("/api/facets", params={"year": "2004", "unique": "1"}).json()["months"]
     assert months == [{"name": "07", "count": 9}]  # unique pictures with a July 2004 date
     assert api.get("/api/facets", params={"year": "1999"}).json()["months"] == []
 
@@ -314,8 +316,9 @@ def test_unknown_year_shows_pictures_without_a_date(scanned):
     assert rel["png"] in undated and rel["heic"] in undated and rel["orphan_thumb"] in undated
     assert rel["photo1"] not in undated
     assert all(not i["taken_at"] for i in all_files(api, year="unknown"))
-    dated = sum(y["count"] for y in api.get("/api/facets").json()["years"] if y["name"] != "unknown")
-    unknown = next(y for y in api.get("/api/facets").json()["years"] if y["name"] == "unknown")
+    years = api.get("/api/facets", params={"unique": "1"}).json()["years"]
+    dated = sum(y["count"] for y in years if y["name"] != "unknown")
+    unknown = next(y for y in years if y["name"] == "unknown")
     assert dated + unknown["count"] == api.get("/api/summary").json()["unique_contents"]
     assert api.get("/api/facets", params={"year": "unknown"}).json()["months"] == []
     assert api.get("/api/files", params={"year": "20x4"}).status_code == 422
@@ -331,3 +334,68 @@ def test_storage_shows_catalog_size(scanned):
         "SELECT count(*) FROM contents WHERE has_preview = 1").fetchone()[0]
     assert st["preview_counts"] == {"s": with_preview, "m": with_preview}
     assert st["disk_free"] > 0 and st["disk_total"] >= st["disk_free"]
+
+
+FACET_PARAMS = {"kinds": "kind", "cameras": "camera", "years": "year", "months": "month", "sizes": "size",
+                "volumes": "volume"}
+
+
+def test_filter_counts_follow_the_other_filters(scanned):
+    """Every option's number is exactly what choosing it would show, given the filters already set."""
+    api, vid, root, rel = scanned
+    for active in ({}, {"kind": "image"}, {"year": "2004"}, {"year": "unknown"}, {"camera": "Canon EOS 10D"},
+                   {"size": "small", "unique": "1"}, {"status": "corrupt"}, {"q": "2004", "month": "07"},
+                   {"volume": vid, "folder": "photos"}):
+        facets = api.get("/api/facets", params=active).json()
+        for facet, param in FACET_PARAMS.items():
+            for option in facets[facet]:
+                chosen = {**active, param: option["name"]}
+                if param == "volume":
+                    chosen.pop("folder", None)
+                n = api.get("/api/files/count", params=chosen).json()["files"]
+                assert option["count"] == n, (active, facet, option)
+    narrowed = api.get("/api/facets", params={"camera": "Canon EOS 10D"}).json()
+    everything = api.get("/api/facets").json()
+    assert sum(k["count"] for k in narrowed["kinds"]) < sum(k["count"] for k in everything["kinds"])
+    assert narrowed["cameras"] == everything["cameras"]  # a facet ignores its own choice
+
+
+def test_size_filter_hides_small_pictures(scanned):
+    api, vid, root, rel = scanned
+    small = all_files(api, size="small")
+    assert small and all(max(i["width"], i["height"]) < 800 for i in small)
+    tiny = all_files(api, size="tiny")
+    assert all(max(i["width"], i["height"]) < 256 for i in tiny)
+    normal = all_files(api, size="normal")
+    assert all(max(i["width"], i["height"]) >= 800 for i in normal)
+    assert not {i["path"] for i in small} & {i["path"] for i in normal}
+    assert api.get("/api/files", params={"size": "huge"}).status_code == 422
+
+
+def test_folder_counts_follow_the_filters(scanned):
+    api, vid, root, rel = scanned
+    plain = api.get("/api/folders", params={"volume": vid}).json()
+    assert all("matches" not in f for f in plain)
+    filtered = api.get("/api/folders", params={"volume": vid, "camera": "Canon EOS 10D"}).json()
+    for f in filtered:
+        assert f["matches"] == api.get("/api/files/count", params={
+            "volume": vid, "folder": f["path"], "camera": "Canon EOS 10D"}).json()["files"]
+    assert {f["name"] for f in filtered} == {f["name"] for f in plain}  # empty folders stay listed
+
+
+def test_filter_counts_catch_up_with_catalog_changes(scanned, tmp_path):
+    """After a change (a scan writing), counts refresh in the background without holding up requests."""
+    from imagelib import queries
+    from imagelib.catalog import Catalog, bump_files_version
+
+    api, vid, root, rel = scanned
+    cat = Catalog.shared(tmp_path / "catalog")
+    idx = queries.FacetIndex()
+    before = idx.facets(cat)
+    cat.conn.execute("UPDATE files SET kind = 'psd' WHERE rel_path = ?", (rel["photo1"],))
+    bump_files_version(cat.conn)
+    assert idx.facets(cat) == before  # served from what is loaded while the reload runs
+    deadline = time.monotonic() + 10
+    while idx.facets(cat) == before and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert idx.facets(cat) != before

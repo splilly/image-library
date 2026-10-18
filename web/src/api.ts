@@ -436,13 +436,22 @@ export interface Folder {
   path: string;
   files: number;
   bytes: number;
+  matches?: number; // files the other library filters show (only while filtering)
 }
 
+export interface FacetCount {
+  name: string;
+  count: number;
+}
+
+/** For each filter, how many files each option would show given the other filters. */
 export interface Facets {
-  cameras: { name: string; count: number }[];
-  years: { name: string; count: number }[];
-  months: { name: string; count: number }[];
-  kinds: { name: string; count: number }[];
+  volumes: FacetCount[];
+  cameras: FacetCount[];
+  years: FacetCount[];
+  months: FacetCount[];
+  kinds: FacetCount[];
+  sizes: FacetCount[];
 }
 
 export interface FsListing {
@@ -463,7 +472,13 @@ export interface LibraryQuery {
   month?: string;
   q?: string;
   unique?: boolean;
+  size?: string;
   sort?: string;
+}
+
+/** The library filters as query parameters (the sort does not filter). */
+function filterParams(q: LibraryQuery) {
+  return { ...q, recursive: q.recursive === false ? "false" : undefined, sort: undefined };
 }
 
 async function request<T>(method: string, url: string, body?: unknown): Promise<T> {
@@ -521,9 +536,10 @@ export const api = {
       "GET", `/api/files${qs({ ...q, recursive: q.recursive === false ? "false" : undefined, cursor, limit })}`),
   count: (q: LibraryQuery) =>
     request<{ files: number; bytes: number }>(
-      "GET", `/api/files/count${qs({ ...q, recursive: q.recursive === false ? "false" : undefined, sort: undefined })}`),
-  folders: (volume: string, folder = "") => request<Folder[]>("GET", `/api/folders${qs({ volume, folder })}`),
-  facets: (year?: string) => request<Facets>("GET", `/api/facets${qs({ year })}`),
+      "GET", `/api/files/count${qs(filterParams(q))}`),
+  folders: (volume: string, folder = "", q: LibraryQuery = {}) =>
+    request<Folder[]>("GET", `/api/folders${qs({ ...filterParams(q), volume, folder })}`),
+  facets: (q: LibraryQuery) => request<Facets>("GET", `/api/facets${qs(filterParams(q))}`),
   content: (hash: string) => request<ContentDetail>("GET", `/api/contents/${hash}`),
   where: (file: File) => {
     const form = new FormData();

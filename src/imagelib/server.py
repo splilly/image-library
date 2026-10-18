@@ -22,7 +22,7 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, Query, Request, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -214,6 +214,7 @@ def create_app(catalog_dir: Path, workers: int | None = None, auto_relate: bool 
     access = AccessState(catalog_dir)
     tunnel = remote.CloudflaredProcess()
     phash_index = queries.PhashIndex()
+    facet_index = queries.FacetIndex()
 
     @asynccontextmanager
     async def lifespan(app):
@@ -392,38 +393,34 @@ def create_app(catalog_dir: Path, workers: int | None = None, auto_relate: bool 
 
     # -- library -----------------------------------------------------------
 
-    def file_filter(volume: str | None, folder: str, recursive: bool, status: str | None, kind: str | None,
-                    camera: str | None, year: str | None, q: str | None, unique: bool,
-                    month: str | None = None) -> queries.FileFilter:
+    def file_filter(volume: str | None = None, folder: str = "", recursive: bool = True,
+                    status: str | None = None, kind: str | None = None, camera: str | None = None,
+                    year: str | None = None, q: str | None = None, unique: bool = False,
+                    month: str | None = Query(None, pattern=r"^(0?[1-9]|1[0-2])$"),
+                    size: str | None = Query(None, pattern="^(" + "|".join(queries.SIZES) + ")$"),
+                    ) -> queries.FileFilter:
+        """The library's filters, shared by the listing, its count and the filter counts."""
         return queries.FileFilter(volume_id=volume or None, folder=folder, recursive=recursive,
                                   status=status or None, kind=kind or None, camera=camera or None,
-                                  year=year or None, month=month or None, text=q or None, unique=unique)
+                                  year=_valid_year(year), month=month or None, text=q or None, unique=unique,
+                                  size=size or None)
 
     @app.get("/api/files")
-    def list_files(volume: str | None = None, folder: str = "", recursive: bool = True,
-                   status: str | None = None, kind: str | None = None, camera: str | None = None,
-                   year: str | None = None, q: str | None = None, unique: bool = False,
-                   sort: str = "path", cursor: str | None = None, limit: int = Query(200, le=1000),
-                   month: str | None = Query(None, pattern=r"^(0?[1-9]|1[0-2])$")):
-        year = _valid_year(year)
-        flt = file_filter(volume, folder, recursive, status, kind, camera, year, q, unique, month)
+    def list_files(flt: queries.FileFilter = Depends(file_filter), sort: str = "path",
+                   cursor: str | None = None, limit: int = Query(200, le=1000)):
         return queries.list_files(cat(), flt, sort, cursor, limit)
 
     @app.get("/api/files/count")
-    def count_files(volume: str | None = None, folder: str = "", recursive: bool = True,
-                    status: str | None = None, kind: str | None = None, camera: str | None = None,
-                    year: str | None = None, q: str | None = None, unique: bool = False,
-                    month: str | None = Query(None, pattern=r"^(0?[1-9]|1[0-2])$")):
-        flt = file_filter(volume, folder, recursive, status, kind, camera, _valid_year(year), q, unique, month)
+    def count_files(flt: queries.FileFilter = Depends(file_filter)):
         return queries.count_files(cat(), flt)
 
     @app.get("/api/folders")
-    def list_folders(volume: str, folder: str = ""):
-        return queries.folders(cat(), volume, folder)
+    def list_folders(volume: str, flt: queries.FileFilter = Depends(file_filter)):
+        return queries.folders(cat(), volume, flt.folder, flt, facet_index)
 
     @app.get("/api/facets")
-    def facets(year: str | None = None):
-        return queries.facets(cat(), _valid_year(year))
+    def facets(flt: queries.FileFilter = Depends(file_filter)):
+        return facet_index.facets(cat(), flt)
 
     def _valid_year(year: str | None) -> str | None:
         if year and year != queries.UNKNOWN_YEAR and not (len(year) == 4 and year.isdigit()):

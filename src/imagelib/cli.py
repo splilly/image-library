@@ -166,7 +166,10 @@ def _resolve_targets(cat: Catalog, scanner: Scanner, args) -> list:
 
 
 def cmd_scan(args) -> int:
+    from .catalog import setup_logging
+
     cat = open_catalog(args)
+    setup_logging(cat.dir)
     previews = PreviewStore(cat.previews_path)
     printer = ProgressPrinter()
     crash_after = os.environ.get("IMAGELIB_TEST_CRASH_AFTER")  # tests: simulate power loss
@@ -426,11 +429,14 @@ def cmd_serve(args) -> int:
 
     from .server import create_app
 
+    from .catalog import setup_logging
+
     cat = open_catalog(args)
+    log_path = setup_logging(cat.dir)
     app = create_app(cat.dir, workers=args.workers, port=args.port)
     url = f"http://127.0.0.1:{args.port}/"
     print(f"Image Library is running at {url}", flush=True)
-    print(f"Catalog: {cat.dir}")
+    print(f"Catalog: {cat.dir}   (log: {log_path.name})")
     print("Keep this window open while you use it. To stop: close this window or press Ctrl+C;")
     print("a running scan is paused and resumes next time.", flush=True)
     if not args.no_browser:

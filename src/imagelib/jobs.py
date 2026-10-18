@@ -7,6 +7,7 @@ resume from the catalog, the restart costs only a moment.
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from dataclasses import fields
@@ -18,6 +19,7 @@ from .previews import PreviewStore
 from .scanner import Scanner, TargetProgress
 
 FINISHED = ("done", "failed", "offline")
+log = logging.getLogger("imagelib")
 
 
 class OnlineVolumes:
@@ -358,11 +360,25 @@ class ScanManager:
             try:
                 self._run_batch(batch)
             except Exception as e:  # keep the server alive; report and drop the batch
-                self.notes = [f"Scan stopped by an unexpected error: {type(e).__name__}: {e}"]
+                message = f"Scan stopped by an unexpected error: {type(e).__name__}: {e}"
+                log.exception("scan stopped by an unexpected error")
+                self.notes = [message + " — choose Resume to continue where it stopped."]
+                self._record_stop(batch, message)
                 with self._lock:
                     for req in batch:
                         self._wanted.pop(req, None)
                     self._scanner = None
+
+    def _record_stop(self, batch: list[tuple[str, str]], message: str) -> None:
+        """Keep the reason with the scan record, so it survives a restart."""
+        try:
+            cat = Catalog.shared(self.catalog_dir)
+            for volume_id, subpath in batch:
+                scan = cat.resumable_scan(volume_id, subpath)
+                if scan:
+                    cat.set_scan_state(scan["id"], "paused", message)
+        except Exception:
+            log.exception("could not record why the scan stopped")
 
     def _run_batch(self, batch: list[tuple[str, str]]) -> None:
         cat = Catalog.shared(self.catalog_dir)
@@ -386,7 +402,11 @@ class ScanManager:
             self.version += 1
             if self._pause_requested:
                 scanner.stop()
+        log.info("scan started: %s", ", ".join(f"{t.label}/{t.subpath}" if t.subpath else t.label for t in targets))
         results = scanner.run(targets)
+        for p in results.values():
+            log.info("scan of %s ended: %s, %d of %d files checked%s", p.label, p.state, p.files_done,
+                     p.files_total, f" ({p.message})" if p.message else "")
         self.last = [progress_dict(p) for p in results.values()]
         with self._lock:
             for t in targets:

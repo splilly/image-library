@@ -4,6 +4,8 @@ import subprocess
 import sys
 import time
 
+import pytest
+
 from conftest import file_row, register, scan
 
 from imagelib import volumes
@@ -225,3 +227,30 @@ def test_analyzer_upgrades_reread_only_the_results_they_affect(drive, catalog):
     catalog.conn.execute("UPDATE contents SET analyzer_version=4")
     stale = {r[0] for r in catalog.conn.execute(f"SELECT kind || ':' || status FROM contents WHERE {STALE_CONTENT}")}
     assert stale == {"image:ok", "psd:ok"}
+
+
+def test_writes_wait_out_a_busy_catalog(tmp_path):
+    """A lock held longer than SQLite's own wait delays a writer instead of failing it."""
+    import sqlite3
+    import threading
+
+    from imagelib.catalog import write_transaction
+
+    db = tmp_path / "t.db"
+    setup = sqlite3.connect(db, isolation_level=None)
+    setup.execute("PRAGMA journal_mode=WAL")
+    setup.execute("CREATE TABLE t(x)")
+    writer = sqlite3.connect(db, isolation_level=None, timeout=0.2)  # gives up after 0.2 s on its own
+    holder = sqlite3.connect(db, isolation_level=None, check_same_thread=False)
+    holder.execute("BEGIN IMMEDIATE")
+    threading.Timer(1.5, lambda: holder.execute("COMMIT")).start()
+
+    started = time.monotonic()
+    write_transaction(writer, lambda: writer.execute("INSERT INTO t VALUES (1)"), patience=10)
+    assert time.monotonic() - started >= 1.4
+    assert setup.execute("SELECT count(*) FROM t").fetchone()[0] == 1
+
+    holder.execute("BEGIN IMMEDIATE")  # and never released: the writer eventually gives up
+    with pytest.raises(sqlite3.OperationalError):
+        write_transaction(writer, lambda: writer.execute("INSERT INTO t VALUES (2)"), patience=1)
+    holder.execute("ROLLBACK")

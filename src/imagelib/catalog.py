@@ -15,6 +15,7 @@ Design notes
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import threading
 import time
@@ -315,6 +316,58 @@ _MIGRATIONS = {
     CREATE INDEX export_items_status ON export_items(export_id, status);
     """,
 }
+
+
+LOCK_PATIENCE = 15 * 60  # seconds a background writer waits out a busy catalog before giving up
+log = logging.getLogger("imagelib")
+
+
+def _busy(e: sqlite3.OperationalError) -> bool:
+    text = str(e).lower()
+    return "locked" in text or "busy" in text
+
+
+def write_transaction(conn: sqlite3.Connection, work, patience: float = LOCK_PATIENCE) -> None:
+    """Run ``work()`` in one write transaction, waiting out a busy catalog.
+
+    Each attempt to start already waits up to the connection timeout (60 s); after that
+    it backs off and tries again for up to ``patience`` seconds, so a long write
+    elsewhere delays a scan instead of stopping it. ``work`` must be safe to repeat.
+    """
+    started, delay = time.monotonic(), 1.0
+    while True:
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError as e:
+            if not _busy(e) or time.monotonic() - started > patience:
+                raise
+            log.warning("catalog busy (%s); retrying in %.0f s", e, delay)
+            time.sleep(delay)
+            delay = min(30.0, delay * 2)
+            continue
+        try:
+            work()
+            conn.execute("COMMIT")
+            return
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+
+
+def setup_logging(directory: Path) -> Path:
+    """Log scan events and errors to <catalog>/imagelib.log (rotated), as well as the console."""
+    from logging.handlers import RotatingFileHandler
+
+    path = Path(directory) / "imagelib.log"
+    handler = RotatingFileHandler(path, maxBytes=2 * 1024 * 1024, backupCount=3, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    for name in ("imagelib", "uvicorn.error"):
+        logger = logging.getLogger(name)
+        if not any(isinstance(h, RotatingFileHandler) and h.baseFilename == handler.baseFilename
+                   for h in logger.handlers):
+            logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+    return path
 
 
 def bump_files_version(conn: sqlite3.Connection, contents: bool = False) -> None:

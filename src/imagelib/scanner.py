@@ -45,7 +45,7 @@ from pathlib import Path
 import blake3
 
 from . import analyze, discover, formats, sysmem, volumes
-from .catalog import Catalog, bump_files_version, to_signed64
+from .catalog import Catalog, bump_files_version, to_signed64, write_transaction
 from .previews import PreviewStore
 
 GB = 1024 ** 3
@@ -731,17 +731,20 @@ class Scanner:
         self.previews.put_many(self._pending_previews)
         self._pending_previews = []
         conn = self.catalog.conn
-        conn.execute("BEGIN IMMEDIATE")
-        bump_files_version(conn, contents=any(sql.startswith("INSERT OR REPLACE INTO contents")
-                                              for sql, _ in self._pending_writes))
-        for sql, args in self._pending_writes:
-            conn.execute(sql, args)
-            if self._crash_after is not None and sql.startswith("UPDATE files"):
-                self._committed_files += 1
-                if self._committed_files >= self._crash_after:  # test hook: die like a power cut
-                    conn.execute("COMMIT")
-                    os._exit(17)
-        conn.execute("COMMIT")
+
+        def work() -> None:
+            bump_files_version(conn, contents=any(sql.startswith("INSERT OR REPLACE INTO contents")
+                                                  for sql, _ in self._pending_writes))
+            for sql, args in self._pending_writes:
+                conn.execute(sql, args)
+                if self._crash_after is not None and sql.startswith("UPDATE files"):
+                    self._committed_files += 1
+                    if self._committed_files >= self._crash_after:  # test hook: die like a power cut
+                        conn.execute("COMMIT")
+                        os._exit(17)
+
+        # A busy catalog delays the scan (results wait in memory) instead of stopping it.
+        write_transaction(conn, work)
         self._pending_writes = []
 
     def _update_progress(self) -> None:

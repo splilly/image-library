@@ -36,6 +36,7 @@ class FileFilter:
     kind: str | None = None
     camera: str | None = None
     year: str | None = None
+    month: str | None = None      # "01".."12"; with a year that month of that year, alone that month of any year
     text: str | None = None       # substring of the path
     unique: bool = False          # one row per unique content
 
@@ -75,9 +76,16 @@ class FileFilter:
         if self.camera:
             clauses.append("c.camera_model = ?")
             args.append(self.camera)
-        if self.year:
+        if self.year and self.month:
+            y, m = int(self.year), int(self.month)
+            clauses.append("c.taken_at >= ? AND c.taken_at < ?")
+            args += [f"{y:04d}-{m:02d}", f"{y + m // 12:04d}-{m % 12 + 1:02d}"]
+        elif self.year:
             clauses.append("c.taken_at >= ? AND c.taken_at < ?")
             args += [self.year, str(int(self.year) + 1)]
+        elif self.month:
+            clauses.append("c.taken_at GLOB '[12][0-9][0-9][0-9]-*' AND substr(c.taken_at, 6, 2) = ?")
+            args.append(f"{int(self.month):02d}")
         if self.text:
             clauses.append("f.rel_path LIKE ? ESCAPE '\\'")
             escaped = self.text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
@@ -161,9 +169,16 @@ def folders(cat: Catalog, volume_id: str, folder: str = "") -> list[dict]:
             for r in cat.conn.execute(sql, args)]
 
 
-def facets(cat: Catalog) -> dict:
+def facets(cat: Catalog, year: str | None = None) -> dict:
     c = cat.conn
+    month_sql = ("SELECT substr(taken_at, 6, 2) AS m, count(*) FROM contents "
+                 "WHERE taken_at GLOB '[12][0-9][0-9][0-9]-[01][0-9]*'")
+    month_args: list = []
+    if year:  # months of the selected year only
+        month_sql += " AND taken_at >= ? AND taken_at < ?"
+        month_args = [year, str(int(year) + 1)]
     return {
+        "months": [{"name": r[0], "count": r[1]} for r in c.execute(month_sql + " GROUP BY m ORDER BY m", month_args)],
         "cameras": [{"name": r[0], "count": r[1]} for r in c.execute(
             "SELECT camera_model, count(*) FROM contents WHERE camera_model IS NOT NULL "
             "GROUP BY camera_model ORDER BY count(*) DESC")],

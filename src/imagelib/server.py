@@ -366,24 +366,27 @@ def create_app(catalog_dir: Path, workers: int | None = None, auto_relate: bool 
     # -- library -----------------------------------------------------------
 
     def file_filter(volume: str | None, folder: str, recursive: bool, status: str | None, kind: str | None,
-                    camera: str | None, year: str | None, q: str | None, unique: bool) -> queries.FileFilter:
+                    camera: str | None, year: str | None, q: str | None, unique: bool,
+                    month: str | None = None) -> queries.FileFilter:
         return queries.FileFilter(volume_id=volume or None, folder=folder, recursive=recursive,
                                   status=status or None, kind=kind or None, camera=camera or None,
-                                  year=year or None, text=q or None, unique=unique)
+                                  year=year or None, month=month or None, text=q or None, unique=unique)
 
     @app.get("/api/files")
     def list_files(volume: str | None = None, folder: str = "", recursive: bool = True,
                    status: str | None = None, kind: str | None = None, camera: str | None = None,
                    year: str | None = None, q: str | None = None, unique: bool = False,
-                   sort: str = "path", cursor: str | None = None, limit: int = Query(200, le=1000)):
-        flt = file_filter(volume, folder, recursive, status, kind, camera, year, q, unique)
+                   sort: str = "path", cursor: str | None = None, limit: int = Query(200, le=1000),
+                   month: str | None = Query(None, pattern=r"^(0?[1-9]|1[0-2])$")):
+        flt = file_filter(volume, folder, recursive, status, kind, camera, year, q, unique, month)
         return queries.list_files(cat(), flt, sort, cursor, limit)
 
     @app.get("/api/files/count")
     def count_files(volume: str | None = None, folder: str = "", recursive: bool = True,
                     status: str | None = None, kind: str | None = None, camera: str | None = None,
-                    year: str | None = None, q: str | None = None, unique: bool = False):
-        flt = file_filter(volume, folder, recursive, status, kind, camera, year, q, unique)
+                    year: str | None = None, q: str | None = None, unique: bool = False,
+                    month: str | None = Query(None, pattern=r"^(0?[1-9]|1[0-2])$")):
+        flt = file_filter(volume, folder, recursive, status, kind, camera, year, q, unique, month)
         return queries.count_files(cat(), flt)
 
     @app.get("/api/folders")
@@ -391,8 +394,8 @@ def create_app(catalog_dir: Path, workers: int | None = None, auto_relate: bool 
         return queries.folders(cat(), volume, folder)
 
     @app.get("/api/facets")
-    def facets():
-        return queries.facets(cat())
+    def facets(year: str | None = Query(None, pattern=r"^[12][0-9]{3}$")):
+        return queries.facets(cat(), year)
 
     def parse_hash(hex_hash: str) -> bytes:
         try:

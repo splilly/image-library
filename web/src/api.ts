@@ -430,6 +430,7 @@ export interface Folder {
 export interface Facets {
   cameras: { name: string; count: number }[];
   years: { name: string; count: number }[];
+  months: { name: string; count: number }[];
   kinds: { name: string; count: number }[];
 }
 
@@ -448,6 +449,7 @@ export interface LibraryQuery {
   kind?: string;
   camera?: string;
   year?: string;
+  month?: string;
   q?: string;
   unique?: boolean;
   sort?: string;
@@ -509,7 +511,7 @@ export const api = {
     request<{ files: number; bytes: number }>(
       "GET", `/api/files/count${qs({ ...q, recursive: q.recursive === false ? "false" : undefined, sort: undefined })}`),
   folders: (volume: string, folder = "") => request<Folder[]>("GET", `/api/folders${qs({ volume, folder })}`),
-  facets: () => request<Facets>("GET", "/api/facets"),
+  facets: (year?: string) => request<Facets>("GET", `/api/facets${qs({ year })}`),
   content: (hash: string) => request<ContentDetail>("GET", `/api/contents/${hash}`),
   where: (file: File) => {
     const form = new FormData();

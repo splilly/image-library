@@ -25,7 +25,9 @@ const SORTS: [string, string][] = [
   ["size_desc", "Largest first"],
 ];
 const KIND_LABEL: Record<string, string> = { image: "Images", raw: "RAW", psd: "Photoshop", video: "Videos" };
-const PARAMS = ["volume", "folder", "status", "kind", "camera", "year", "q", "sort", "unique", "flat"] as const;
+const PARAMS = ["volume", "folder", "status", "kind", "camera", "year", "month", "q", "sort", "unique", "flat"] as const;
+const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October",
+  "November", "December"];
 
 export default function Library({ params }: { params: URLSearchParams }) {
   const query: LibraryQuery = useMemo(() => ({
@@ -36,6 +38,7 @@ export default function Library({ params }: { params: URLSearchParams }) {
     kind: params.get("kind") || undefined,
     camera: params.get("camera") || undefined,
     year: params.get("year") || undefined,
+    month: params.get("month") || undefined,
     q: params.get("q") || undefined,
     unique: params.get("unique") === "1",
     sort: params.get("sort") || "path",
@@ -50,7 +53,7 @@ export default function Library({ params }: { params: URLSearchParams }) {
 
   const vols = useLoad(() => api.volumes(), []);
   const volumes = useMemo(() => new Map((vols.data ?? []).map((v) => [v.id, v])), [vols.data]);
-  const facets = useLoad(() => api.facets(), []);
+  const facets = useLoad(() => api.facets(query.year), [query.year]);
   const total = useLoad(() => api.count(query), [queryKey]);
 
   // Search box: type freely, the query follows after a pause. The box also follows the URL
@@ -178,6 +181,15 @@ export default function Library({ params }: { params: URLSearchParams }) {
           <select value={query.year ?? ""} onChange={(e) => setParam({ year: e.target.value || undefined })}>
             <option value="">Any year</option>
             {facets.data?.years.map((y) => <option key={y.name} value={y.name}>{y.name} ({count(y.count)})</option>)}
+          </select>
+          <select value={query.month ?? ""} onChange={(e) => setParam({ month: e.target.value || undefined })}
+            aria-label="Month" title={query.year ? `Months of ${query.year}` : "This month in any year"}>
+            <option value="">Any month</option>
+            {MONTHS.map((name, i) => {
+              const value = String(i + 1).padStart(2, "0");
+              const n = facets.data?.months.find((m) => m.name === value)?.count;
+              return <option key={value} value={value} disabled={facets.data ? !n : false}>{name}{n ? ` (${count(n)})` : ""}</option>;
+            })}
           </select>
           <select value={query.sort} onChange={(e) => setParam({ sort: e.target.value === "path" ? undefined : e.target.value })}>
             {SORTS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}

@@ -293,3 +293,16 @@ def test_action_plan_endpoints(scanned):
     assert api.post(f"/api/plans/{plan['id']}/purge", json={"confirm": "yes"}).status_code == 400
     assert api.post(f"/api/plans/{plan['id']}/restore", json={}).json()["restored"] == 1
     assert (root / rel["dup1"]).exists()
+
+
+def test_month_filter(scanned):
+    api, vid, root, rel = scanned
+    july = all_files(api, month="07")
+    assert july and all(i["taken_at"][5:7] == "07" for i in july)
+    assert {i["path"] for i in all_files(api, year="2004", month="7")} == {i["path"] for i in july}
+    assert all_files(api, month="08") == [] and all_files(api, year="2005", month="07") == []
+    assert api.get("/api/files/count", params={"month": "07"}).json()["files"] == len(july)
+    assert api.get("/api/files", params={"month": "13"}).status_code == 422
+    months = api.get("/api/facets", params={"year": "2004"}).json()["months"]
+    assert months == [{"name": "07", "count": 9}]  # unique pictures with a July 2004 date
+    assert api.get("/api/facets", params={"year": "1999"}).json()["months"] == []

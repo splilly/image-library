@@ -155,3 +155,13 @@ def test_login_throttle_slows_repeated_failures():
         t.failed(f"x{i}")
     assert t.delay("b") == 30                 # ...until there is a flood of failures
     t.succeeded("a")
+
+
+def test_refusals_explain_what_to_change(app, local):
+    with remote_client(app, TS_HOST, {"tailscale-user-login": OWNER, "accept": "text/html"}) as c:
+        r = c.get("/")
+        assert r.status_code == 403 and r.headers["content-type"].startswith("text/html")
+        assert "Tailscale access is turned off" in r.text and "Settings" in r.text
+    enable(local, tailscale_enabled=True, tailscale_hosts=["other.tail1234.ts.net"])
+    with remote_client(app, TS_HOST, {"tailscale-user-login": OWNER}) as c:
+        assert "not one of the allowed Tailscale names" in c.get("/api/summary").json()["detail"]

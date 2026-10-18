@@ -13,6 +13,7 @@ Security: the API can list folders, stream photos and move or delete files.
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import os
 import sqlite3
@@ -77,6 +78,14 @@ class AccessControl:
                     self.access.catalog(), request.cookies.get(remote.SESSION_COOKIE)):
                 problem, status = "login required", 401
         if problem:
+            if verdict.kind == "forbidden" and not path.startswith("/api/") \
+                    and "text/html" in request.headers.get("accept", ""):
+                # Someone opened the address in a browser: explain, in a page.
+                page = (f"<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'>"
+                        f"<title>Image Library</title><body style='font:16px system-ui;max-width:34em;margin:4em auto;"
+                        f"padding:0 1em'><h1 style='font-size:20px'>Image Library</h1><p>{html.escape(problem)}</p>")
+                await Response(page, status_code=status, media_type="text/html")(scope, receive, send)
+                return
             body = {"detail": problem, "login": status == 401}
             await JSONResponse(body, status_code=status)(scope, receive, send)
             return

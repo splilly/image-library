@@ -208,6 +208,19 @@ def classify(headers: dict[str, str], host: str | None, settings: RemoteSettings
         except Exception as e:
             return Verdict("forbidden", problem=f"Cloudflare Access token rejected: {e}")
         return Verdict("remote", "cloudflare", claims.get("email") or claims.get("sub", ""))
+    # Say what to change, without revealing anything about the library.
+    settings_hint = "On the computer running Image Library, open Settings → Remote access"
+    if host.endswith(".ts.net") or "tailscale-user-login" in headers:
+        if not settings.tailscale_enabled:
+            return Verdict("forbidden", problem=f"Tailscale access is turned off. {settings_hint}, "
+                                                f"tick Allow under Tailscale and save.")
+        return Verdict("forbidden", problem=f"{host} is not one of the allowed Tailscale names. "
+                                            f"{settings_hint} and add it under Tailscale.")
+    if "cf-ray" in headers or "cf-access-jwt-assertion" in headers:
+        if not settings.cloudflare_enabled:
+            return Verdict("forbidden", problem=f"Cloudflare access is turned off. {settings_hint}, "
+                                                f"tick Allow under Cloudflare and save.")
+        return Verdict("forbidden", problem=f"{host} is not the configured Cloudflare hostname. {settings_hint}.")
     return Verdict("forbidden", problem="unknown host")
 
 

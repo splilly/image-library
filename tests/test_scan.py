@@ -287,3 +287,15 @@ def test_a_failed_write_never_leaves_the_catalog_locked(tmp_path):
     with transaction(conn):
         conn.execute("INSERT INTO t VALUES (5)")
     assert [r[0] for r in other.execute("SELECT x FROM t ORDER BY x")] == [3, 5]
+
+
+def test_text_that_is_not_valid_unicode_is_stored_not_fatal(catalog):
+    """Broken names or metadata (lone surrogates) are stored with a placeholder instead of stopping the scan."""
+    from imagelib.catalog import write_transaction
+
+    conn = catalog.conn
+    conn.execute("INSERT INTO settings(key, value) VALUES(?, ?)", ("a", "IMG_\udcc0.jpg"))
+    conn.executemany("INSERT INTO settings(key, value) VALUES(:k, :v)", [{"k": "b", "v": "Canon \ud83d"}])
+    write_transaction(conn, lambda: conn.execute("INSERT INTO settings(key, value) VALUES(?, ?)", ("c", "ok \U0001f600")))
+    got = dict(conn.execute("SELECT key, value FROM settings WHERE key IN ('a', 'b', 'c')").fetchall())
+    assert got == {"a": "IMG_�.jpg", "b": "Canon �", "c": "ok \U0001f600"}

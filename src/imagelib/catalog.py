@@ -320,6 +320,40 @@ _MIGRATIONS = {
 }
 
 
+def clean_text(value: str) -> str:
+    """``value`` with anything SQLite cannot store as UTF-8 (lone surrogates) replaced by \ufffd.
+
+    They come from names and metadata that are not valid text: undecodable bytes in a
+    file name, or broken strings in a photo's EXIF.
+    """
+    if value.isascii():
+        return value
+    try:
+        value.encode("utf-8")
+        return value
+    except UnicodeEncodeError:
+        return value.encode("utf-16", "surrogatepass").decode("utf-16", "replace")
+
+
+def _clean_args(args):
+    if isinstance(args, dict):
+        return {k: clean_text(v) if isinstance(v, str) else v for k, v in args.items()}
+    return tuple(clean_text(v) if isinstance(v, str) else v for v in args)
+
+
+class _Connection(sqlite3.Connection):
+    """Stores text that is not valid Unicode (see ``clean_text``) instead of failing the write."""
+
+    def execute(self, sql, parameters=(), /):
+        try:
+            return super().execute(sql, parameters)
+        except UnicodeEncodeError:  # raised while binding, before anything ran: safe to retry
+            return super().execute(sql, _clean_args(parameters))
+
+    def executemany(self, sql, seq_of_parameters, /):
+        return super().executemany(sql, (_clean_args(p) for p in seq_of_parameters))
+
+
 LOCK_PATIENCE = 15 * 60  # seconds a background writer waits out a busy catalog before giving up
 log = logging.getLogger("imagelib")
 
@@ -451,7 +485,8 @@ class Catalog:
 
     def connect(self, shared: bool = False) -> sqlite3.Connection:
         """A new connection; ``shared`` allows several threads to use it (the caller serialises access)."""
-        conn = sqlite3.connect(self.db_path, timeout=60, isolation_level=None, check_same_thread=not shared)
+        conn = sqlite3.connect(self.db_path, timeout=60, isolation_level=None, check_same_thread=not shared,
+                               factory=_Connection)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")

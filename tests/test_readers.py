@@ -53,19 +53,15 @@ def test_drive_with_per_file_latency_gets_more_readers(many_files, catalog, fast
 
 def test_seeking_drive_stays_at_one_reader(many_files, catalog, fast_tuning):
     """Like a spinning disk: every extra read in flight makes all of them slower."""
-    active = [0]
-    lock = threading.Lock()
+    head = threading.Lock()  # one read at a time, like a disk head
+    waiting = [0]
 
     def read_file(path, inline):
-        with lock:
-            active[0] += 1
-            n = active[0]
-        try:
-            time.sleep(0.01 * n ** 1.5)  # throughput falls as reads compete (seeking)
+        waiting[0] += 1
+        with head:
+            waiting[0] -= 1
+            time.sleep(0.01 if not waiting[0] else 0.02)  # a seek away and back when reads compete
             return Scanner._read_file(path, inline)
-        finally:
-            with lock:
-                active[0] -= 1
 
     prog, ctrl, vid = scan_with(catalog, many_files, read_file)
     assert prog.state == "done" and prog.files_done == 500

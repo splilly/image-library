@@ -548,7 +548,7 @@ class Catalog:
                 conn.close()
         return out
 
-    def summary(self) -> dict:
+    def summary(self, include_duplicates: bool = True) -> dict:
         c = self.conn
         files = c.execute(
             "SELECT count(*), coalesce(sum(size),0), sum(state='pending'), sum(state='read_error'), "
@@ -561,7 +561,7 @@ class Catalog:
             "SELECT count(*), coalesce(sum(n-1),0), coalesce(sum((n-1)*size),0) FROM "
             "(SELECT count(*) AS n, max(size) AS size FROM files WHERE content_hash IS NOT NULL "
             "AND state='done' GROUP BY content_hash HAVING n>1)"
-        ).fetchone()
+        ).fetchone() if include_duplicates else (None, None, None)
         return {
             "files": files[0], "bytes": files[1], "pending": files[2] or 0,
             "read_errors": files[3] or 0, "missing": files[4] or 0,

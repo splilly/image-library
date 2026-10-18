@@ -195,42 +195,68 @@ def _meta(conn: sqlite3.Connection, key: str) -> int:
     return int(row[0]) if row else 0
 
 
-def refresh_duplicates(cat: Catalog, force: bool = False) -> bool:
-    """Rebuild dup_groups / dup_folder_pairs if files changed since the last build."""
+REBUILD_INTERVAL = 60.0  # while files keep changing (a scan), rebuild at most this often
+_last_rebuild: dict[str, float] = {}
+
+
+def refresh_duplicates(cat: Catalog, force: bool = False, busy: bool = False) -> bool:
+    """Rebuild dup_groups / dup_folder_pairs if files changed since the last build.
+
+    The grouping is computed into temporary tables, which does not lock the catalog;
+    only the final swap is a (short) write. While a scan or plan is running (``busy``)
+    and keeps changing files, the previous result is served for up to REBUILD_INTERVAL
+    seconds instead of rebuilding on every request.
+    """
     conn = cat.conn
+    key = str(cat.db_path)
     with _lock:
         files_version = _meta(conn, "files_version")
-        if not force and _meta(conn, "dup_version") == files_version:
+        dup_version = _meta(conn, "dup_version")
+        if not force and dup_version == files_version:
             return False
-        conn.execute("BEGIN IMMEDIATE")
-        try:
-            conn.execute("DELETE FROM dup_groups")
-            conn.execute("""
-                INSERT INTO dup_groups(hash, copies, drives, max_per_drive, size)
+        if (busy and not force and dup_version >= 0
+                and time.monotonic() - _last_rebuild.get(key, -1e9) < REBUILD_INTERVAL):
+            return False
+        conn.execute("DROP TABLE IF EXISTS temp.new_dup_groups")
+        conn.execute("DROP TABLE IF EXISTS temp.new_dup_folder_pairs")
+        conn.execute("CREATE TEMP TABLE new_dup_groups AS SELECT * FROM dup_groups WHERE 0")
+        conn.execute("CREATE TEMP TABLE new_dup_folder_pairs AS SELECT * FROM dup_folder_pairs WHERE 0")
+        conn.execute("""
+                INSERT INTO temp.new_dup_groups(hash, copies, drives, max_per_drive, size)
                 SELECT content_hash, sum(n), count(*), max(n), max(size) FROM (
                     SELECT content_hash, volume_id, count(*) AS n, max(size) AS size FROM files
                     WHERE content_hash IS NOT NULL AND state != 'missing'
                     GROUP BY content_hash, volume_id)
                 GROUP BY content_hash HAVING sum(n) > 1""")
-            conn.execute("DELETE FROM dup_folder_pairs")
-            # Folder of a path: strip the trailing name (rtrim of all non-'/' chars), then the '/'.
-            conn.execute("""
+        conn.execute("CREATE INDEX temp.new_dup_groups_hash ON new_dup_groups(hash)")
+        # Folder of a path: strip the trailing name (rtrim of all non-'/' chars), then the '/'.
+        conn.execute("""
                 WITH d AS (
                     SELECT f.content_hash AS h, f.volume_id AS v,
                            rtrim(rtrim(f.rel_path, replace(f.rel_path, '/', '')), '/') AS dir, g.size AS size
-                    FROM files f JOIN dup_groups g ON g.hash = f.content_hash
+                    FROM files f JOIN temp.new_dup_groups g ON g.hash = f.content_hash
                     -- Files copied hundreds of times (blank frames, stock art) say nothing about
                     -- folders and would make this self-join quadratic.
                     WHERE f.state != 'missing' AND g.copies <= ?)
-                INSERT INTO dup_folder_pairs(a_volume, a_folder, b_volume, b_folder, shared, bytes)
+                INSERT INTO temp.new_dup_folder_pairs(a_volume, a_folder, b_volume, b_folder, shared, bytes)
                 SELECT a.v, a.dir, b.v, b.dir, count(DISTINCT a.h), sum(a.size) FROM d a JOIN d b
                     ON a.h = b.h AND (a.v < b.v OR (a.v = b.v AND a.dir < b.dir))
                 GROUP BY a.v, a.dir, b.v, b.dir""", (FOLDER_PAIR_MAX_COPIES,))
+        conn.execute("BEGIN IMMEDIATE")  # the swap: the only part that locks the catalog
+        try:
+            conn.execute("DELETE FROM dup_groups")
+            conn.execute("INSERT INTO dup_groups SELECT * FROM temp.new_dup_groups")
+            conn.execute("DELETE FROM dup_folder_pairs")
+            conn.execute("INSERT INTO dup_folder_pairs SELECT * FROM temp.new_dup_folder_pairs")
             conn.execute("UPDATE meta SET value = ? WHERE key = 'dup_version'", (str(files_version),))
             conn.execute("COMMIT")
         except BaseException:
             conn.execute("ROLLBACK")
             raise
+        finally:
+            conn.execute("DROP TABLE IF EXISTS temp.new_dup_groups")
+            conn.execute("DROP TABLE IF EXISTS temp.new_dup_folder_pairs")
+        _last_rebuild[key] = time.monotonic()
     return True
 
 
@@ -275,9 +301,9 @@ def group_copies(cat: Catalog, content_hash: bytes) -> list[Copy]:
 
 
 def duplicate_groups(cat: Catalog, scope: str = "any", volume: str | None = None, undecided: bool = False,
-                     offset: int = 0, limit: int = 100) -> dict:
+                     offset: int = 0, limit: int = 100, busy: bool = False) -> dict:
     """Groups of identical files, biggest waste first."""
-    refresh_duplicates(cat)
+    refresh_duplicates(cat, busy=busy)
     where, args = ["1"], []
     if scope == "same_drive":
         where.append("g.max_per_drive > 1")
@@ -333,8 +359,9 @@ def apply_suggestions(cat: Catalog, hashes: list[bytes]) -> dict:
     return {"groups": len(keep_ids), "discarded": len(discard_ids)}
 
 
-def folder_pairs(cat: Catalog, volume: str | None = None, offset: int = 0, limit: int = 100) -> dict:
-    refresh_duplicates(cat)
+def folder_pairs(cat: Catalog, volume: str | None = None, offset: int = 0, limit: int = 100,
+                 busy: bool = False) -> dict:
+    refresh_duplicates(cat, busy=busy)
     where, args = "1", []
     if volume:
         where, args = "(a_volume = ? OR b_volume = ?)", [volume, volume]

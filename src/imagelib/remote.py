@@ -23,6 +23,7 @@ import json
 import os
 import secrets
 import shutil
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -122,16 +123,52 @@ def create_session(cat: Catalog, via: str, client: str, user_agent: str) -> str:
     return token
 
 
+_seen: dict[str, float] = {}          # token hash -> last request, not yet saved
+_seen_lock = threading.Lock()
+_seen_saved_at = 0.0
+
+
 def valid_session(cat: Catalog, token: str | None) -> bool:
+    """Read-only check (it runs on every remote request and must never wait for a lock)."""
     if not token:
         return False
     h = _token_hash(token)
-    row = cat.conn.execute("SELECT expires_at, last_seen_at FROM sessions WHERE token_hash = ?", (h,)).fetchone()
+    row = cat.conn.execute("SELECT expires_at FROM sessions WHERE token_hash = ?", (h,)).fetchone()
     if row is None or row[0] < time.time():
         return False
-    if time.time() - row[1] > 300:  # don't write on every request
-        cat.conn.execute("UPDATE sessions SET last_seen_at = ? WHERE token_hash = ?", (time.time(), h))
+    _note_seen(cat, h)
     return True
+
+
+def _note_seen(cat: Catalog, token_hash: str) -> None:
+    """Remember when a device was last seen; saved in the background every few minutes.
+
+    It is only shown in the device list, so it is saved on a best-effort basis: a busy
+    catalog (a scan writing) simply means it is saved next time.
+    """
+    global _seen_saved_at
+    with _seen_lock:
+        _seen[token_hash] = time.time()
+        if time.time() - _seen_saved_at < 300:
+            return
+        _seen_saved_at = time.time()
+        pending = dict(_seen)
+        _seen.clear()
+
+    def save() -> None:
+        try:
+            conn = sqlite3.connect(cat.db_path, timeout=2, isolation_level=None)
+            try:
+                conn.executemany("UPDATE sessions SET last_seen_at = ? WHERE token_hash = ?",
+                                 [(t, h) for h, t in pending.items()])
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            with _seen_lock:
+                for h, t in pending.items():
+                    _seen.setdefault(h, t)
+
+    threading.Thread(target=save, daemon=True).start()
 
 
 def end_session(cat: Catalog, token: str | None) -> None:

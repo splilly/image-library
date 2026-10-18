@@ -165,3 +165,39 @@ def test_refusals_explain_what_to_change(app, local):
     enable(local, tailscale_enabled=True, tailscale_hosts=["other.tail1234.ts.net"])
     with remote_client(app, TS_HOST, {"tailscale-user-login": OWNER}) as c:
         assert "not one of the allowed Tailscale names" in c.get("/api/summary").json()["detail"]
+
+
+def test_remote_requests_never_wait_for_a_busy_catalog(app, local):
+    """A long write elsewhere (a scan) must not stall or fail signed-in requests."""
+    import sqlite3
+    import threading
+
+    enable(local, tailscale_enabled=True, tailscale_hosts=[TS_HOST])
+    with remote_client(app, TS_HOST, {"tailscale-user-login": OWNER}) as me:
+        me.post("/api/auth/login", json={"password": PASSWORD})
+        db = app.state.access.catalog().db_path
+        # Make the next request want to record "last seen" (a write).
+        app.state.access.catalog().conn.execute("UPDATE sessions SET last_seen_at = 0")
+        remote._seen_saved_at = 0
+        locked, release = threading.Event(), threading.Event()
+
+        def hold_write_lock():
+            c = sqlite3.connect(db, isolation_level=None)
+            c.execute("BEGIN IMMEDIATE")
+            locked.set()
+            release.wait(10)
+            c.execute("ROLLBACK")
+            c.close()
+
+        holder = threading.Thread(target=hold_write_lock)
+        holder.start()
+        locked.wait(5)
+        try:
+            started = time.monotonic()
+            assert me.get("/api/summary").status_code == 200
+            assert me.get("/api/auth/status").json()["signed_in"] is True
+            assert time.monotonic() - started < 3   # the lock is held for longer than that
+        finally:
+            time.sleep(1)
+            release.set()
+            holder.join()

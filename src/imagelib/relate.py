@@ -199,9 +199,14 @@ def run(cat: Catalog, should_stop=lambda: False, on_progress=lambda p: None, thr
 
     prog.phase = "finishing"
     on_progress(prog)
+    # Work out the results with plain reads, then write them in one short transaction.
+    candidates = _thumb_candidates(conn)
+    clusters = _clusters(conn)
     conn.execute("BEGIN IMMEDIATE")
-    _build_thumb_candidates(conn)
-    _build_clusters(conn)
+    conn.execute("DELETE FROM thumb_candidates")
+    conn.executemany("INSERT INTO thumb_candidates(hash, reason) VALUES(?, ?)", candidates)
+    conn.execute("DELETE FROM similar_clusters")
+    conn.executemany("INSERT INTO similar_clusters(cluster, hash) VALUES(?, ?)", clusters)
     _set_meta(conn, "relate_version", target)
     conn.execute("COMMIT")
     prog.state, prog.phase = "done", "done"
@@ -273,28 +278,28 @@ def _insert_same_pixels(conn, stills: _Stills) -> None:
     conn.executemany("INSERT OR REPLACE INTO similar_pairs(a, b, kind, phash_dist, scale) VALUES(?,?,?,?,?)", pairs)
 
 
-def _build_thumb_candidates(conn) -> None:
-    conn.execute("DELETE FROM thumb_candidates")
+def _thumb_candidates(conn) -> list[tuple[bytes, str]]:
+    """(hash, reason) for contents that look like generated thumbnails."""
     # By size: tiny images, or small JPEGs without camera data (what thumbnail generators
     # write). Small screenshots, scans or early VGA camera photos (which carry camera
     # EXIF) are not thumbnails.
-    conn.execute(
-        "INSERT INTO thumb_candidates(hash, reason) SELECT hash, 'small (' || max(width, height) || ' px)' "
-        "FROM contents WHERE kind = 'image' AND width > 0 AND (max(width, height) <= ? "
-        "OR (max(width, height) <= ? AND format = 'JPEG' AND camera_model IS NULL))",
-        (TINY_EDGE, THUMB_EDGE))
-    by_path = {}
+    reasons: dict[bytes, list[str]] = {}
+    for h, edge in conn.execute(
+            "SELECT hash, max(width, height) FROM contents WHERE kind = 'image' AND width > 0 AND "
+            "(max(width, height) <= ? OR (max(width, height) <= ? AND format = 'JPEG' AND camera_model IS NULL))",
+            (TINY_EDGE, THUMB_EDGE)):
+        reasons[h] = [f"small ({edge} px)"]
+    by_path: set[bytes] = set()
     for h, path in conn.execute("SELECT content_hash, rel_path FROM files WHERE state != 'missing' "
                                 "AND content_hash IS NOT NULL AND kind != 'video'"):
         if h not in by_path and _THUMB_PATH.search(path):
-            by_path[h] = "thumbnail-style folder or name"
-    conn.executemany("INSERT INTO thumb_candidates(hash, reason) VALUES(?, ?) "
-                     "ON CONFLICT(hash) DO UPDATE SET reason = reason || ', ' || excluded.reason",
-                     list(by_path.items()))
+            by_path.add(h)
+            reasons.setdefault(h, []).append("thumbnail-style folder or name")
+    return [(h, ", ".join(r)) for h, r in reasons.items()]
 
 
-def _build_clusters(conn) -> None:
-    """Connected components of same_pixels / near pairs."""
+def _clusters(conn) -> list[tuple[int, bytes]]:
+    """(cluster, hash): connected components of same_pixels / near pairs."""
     parent: dict[bytes, bytes] = {}
 
     def find(x: bytes) -> bytes:
@@ -314,5 +319,4 @@ def _build_clusters(conn) -> None:
     for h in parent:
         r = find(h)
         rows.append((roots.setdefault(r, len(roots) + 1), h))
-    conn.execute("DELETE FROM similar_clusters")
-    conn.executemany("INSERT INTO similar_clusters(cluster, hash) VALUES(?, ?)", rows)
+    return rows

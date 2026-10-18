@@ -74,8 +74,8 @@ class AccessControl:
         elif verdict.kind == "remote" and path.startswith("/api/") and not path.startswith("/api/sync/"):
             if path.startswith(LOCAL_ONLY):
                 problem = "this can only be changed on the computer running the app"
-            elif not path.startswith(REMOTE_PUBLIC) and not remote.valid_session(
-                    self.access.catalog(), request.cookies.get(remote.SESSION_COOKIE)):
+            elif not path.startswith(REMOTE_PUBLIC) and not await asyncio.to_thread(
+                    remote.valid_session, self.access.catalog(), request.cookies.get(remote.SESSION_COOKIE)):
                 problem, status = "login required", 401
         if problem:
             if verdict.kind == "forbidden" and not path.startswith("/api/") \
@@ -248,6 +248,12 @@ def create_app(catalog_dir: Path, workers: int | None = None, auto_relate: bool 
     # -- overview ----------------------------------------------------------
 
     storage_cache: dict = {}
+    summary_cache: dict = {}
+    DUP_KEYS = ("duplicate_groups", "redundant_copies", "redundant_bytes")
+
+    def busy() -> bool:
+        """A scan or plan is changing files right now."""
+        return scans.running or plan_runner.running
 
     @app.get("/api/storage")
     def storage():
@@ -264,7 +270,14 @@ def create_app(catalog_dir: Path, workers: int | None = None, auto_relate: bool 
     @app.get("/api/summary")
     def summary():
         c = cat()
-        return {**c.summary(), "catalog_dir": str(catalog_dir),
+        # Counting duplicates groups every file; while a scan or plan runs it is refreshed
+        # at most every 30 s rather than on every poll of the Overview.
+        now = time.monotonic()
+        recount = not busy() or "dup" not in summary_cache or now - summary_cache["at"] > 30
+        base = c.summary(include_duplicates=recount)
+        if recount:
+            summary_cache.update(at=now, dup={k: base[k] for k in DUP_KEYS})
+        return {**base, **summary_cache["dup"], "catalog_dir": str(catalog_dir),
                 "unfinished_scans": [dict(volume_id=s["volume_id"], label=s["label"], subpath=s["root_subpath"],
                                           state=s["state"], message=s["message"]) for s in c.unfinished_scans()]}
 
@@ -509,7 +522,7 @@ def create_app(catalog_dir: Path, workers: int | None = None, auto_relate: bool 
     @app.get("/api/review/duplicates")
     def review_duplicates(scope: str = "any", volume: str | None = None, undecided: bool = False,
                           offset: int = 0, limit: int = Query(100, le=500)):
-        return review.duplicate_groups(cat(), scope, volume or None, undecided, offset, limit)
+        return review.duplicate_groups(cat(), scope, volume or None, undecided, offset, limit, busy=busy())
 
     @app.get("/api/review/duplicates/{hex_hash}")
     def review_duplicate(hex_hash: str):
@@ -524,7 +537,7 @@ def create_app(catalog_dir: Path, workers: int | None = None, auto_relate: bool 
 
     @app.get("/api/review/folder-pairs")
     def review_folder_pairs(volume: str | None = None, offset: int = 0, limit: int = Query(100, le=500)):
-        return review.folder_pairs(cat(), volume or None, offset, limit)
+        return review.folder_pairs(cat(), volume or None, offset, limit, busy=busy())
 
     @app.post("/api/review/folder-pairs/discard")
     def review_folder_discard(req: FolderDiscard):

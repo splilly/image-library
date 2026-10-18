@@ -254,3 +254,36 @@ def test_writes_wait_out_a_busy_catalog(tmp_path):
     with pytest.raises(sqlite3.OperationalError):
         write_transaction(writer, lambda: writer.execute("INSERT INTO t VALUES (2)"), patience=1)
     holder.execute("ROLLBACK")
+
+
+
+def test_a_failed_write_never_leaves_the_catalog_locked(tmp_path):
+    """An error inside a transaction rolls it back, so other writers (and later writes) carry on."""
+    import sqlite3
+
+    from imagelib.catalog import transaction, write_transaction
+
+    db = tmp_path / "t.db"
+    conn = sqlite3.connect(db, isolation_level=None)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("CREATE TABLE t(x UNIQUE)")
+    other = sqlite3.connect(db, isolation_level=None, timeout=0.2)
+
+    def clash():
+        conn.execute("INSERT INTO t VALUES (1)")
+        conn.execute("INSERT INTO t VALUES (1)")  # fails part-way through
+
+    with pytest.raises(sqlite3.IntegrityError):
+        write_transaction(conn, clash)
+    assert not conn.in_transaction
+    with pytest.raises(sqlite3.IntegrityError):
+        with transaction(conn):
+            clash()
+    assert not conn.in_transaction
+    other.execute("INSERT INTO t VALUES (3)")  # nobody is left holding the lock
+
+    conn.execute("BEGIN IMMEDIATE")  # abandoned by older code: discarded, not built on
+    conn.execute("INSERT INTO t VALUES (4)")
+    with transaction(conn):
+        conn.execute("INSERT INTO t VALUES (5)")
+    assert [r[0] for r in other.execute("SELECT x FROM t ORDER BY x")] == [3, 5]

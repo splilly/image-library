@@ -32,7 +32,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .catalog import Catalog, to_unsigned64
+from .catalog import Catalog, to_unsigned64, transaction
 
 BLOCK = 512                 # rows per committed unit of work
 COLUMNS = 16384             # columns per numpy operation (bounds memory to ~64 MB per thread)
@@ -161,12 +161,11 @@ def run(cat: Catalog, should_stop=lambda: False, on_progress=lambda p: None, thr
     n = len(stills)
     if _meta(conn, "relate_target") != target:
         # A new run: results from older data are discarded.
-        conn.execute("BEGIN IMMEDIATE")
-        conn.execute("DELETE FROM similar_pairs")
-        _set_meta(conn, "relate_target", target)
-        _set_meta(conn, "relate_block", 0)
-        _insert_same_pixels(conn, stills)
-        conn.execute("COMMIT")
+        with transaction(conn):
+            conn.execute("DELETE FROM similar_pairs")
+            _set_meta(conn, "relate_target", target)
+            _set_meta(conn, "relate_block", 0)
+            _insert_same_pixels(conn, stills)
     starts = list(range(0, n, BLOCK))
     first = _meta(conn, "relate_block")
     prog.phase, prog.total, prog.done = "comparing", len(starts), first
@@ -188,11 +187,10 @@ def run(cat: Catalog, should_stop=lambda: False, on_progress=lambda p: None, thr
             window = pending[w:w + threads * 2]
             for block_start, pairs in zip(window, pool.map(lambda s0: _compare_block(stills, s0), window)):
                 pairs = verify_pairs(pairs, previews)
-                conn.execute("BEGIN IMMEDIATE")
-                conn.executemany("INSERT OR REPLACE INTO similar_pairs(a, b, kind, phash_dist, scale) "
-                                 "VALUES(?,?,?,?,?)", pairs)
-                _set_meta(conn, "relate_block", block_start // BLOCK + 1)
-                conn.execute("COMMIT")
+                with transaction(conn):
+                    conn.executemany("INSERT OR REPLACE INTO similar_pairs(a, b, kind, phash_dist, scale) "
+                                     "VALUES(?,?,?,?,?)", pairs)
+                    _set_meta(conn, "relate_block", block_start // BLOCK + 1)
                 prog.done += 1
                 prog.pairs += len(pairs)
                 on_progress(prog)
@@ -202,13 +200,12 @@ def run(cat: Catalog, should_stop=lambda: False, on_progress=lambda p: None, thr
     # Work out the results with plain reads, then write them in one short transaction.
     candidates = _thumb_candidates(conn)
     clusters = _clusters(conn)
-    conn.execute("BEGIN IMMEDIATE")
-    conn.execute("DELETE FROM thumb_candidates")
-    conn.executemany("INSERT INTO thumb_candidates(hash, reason) VALUES(?, ?)", candidates)
-    conn.execute("DELETE FROM similar_clusters")
-    conn.executemany("INSERT INTO similar_clusters(cluster, hash) VALUES(?, ?)", clusters)
-    _set_meta(conn, "relate_version", target)
-    conn.execute("COMMIT")
+    with transaction(conn):
+        conn.execute("DELETE FROM thumb_candidates")
+        conn.executemany("INSERT INTO thumb_candidates(hash, reason) VALUES(?, ?)", candidates)
+        conn.execute("DELETE FROM similar_clusters")
+        conn.executemany("INSERT INTO similar_clusters(cluster, hash) VALUES(?, ?)", clusters)
+        _set_meta(conn, "relate_version", target)
     prog.state, prog.phase = "done", "done"
     on_progress(prog)
     return True

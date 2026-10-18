@@ -21,6 +21,8 @@ import threading
 import time
 import unicodedata
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 SCHEMA_VERSION = 9
@@ -336,6 +338,9 @@ def write_transaction(conn: sqlite3.Connection, work, patience: float = LOCK_PAT
     """
     started, delay = time.monotonic(), 1.0
     while True:
+        if conn.in_transaction:  # left open by an earlier failure: never build on it
+            log.warning("discarding an unfinished transaction")
+            conn.execute("ROLLBACK")
         try:
             conn.execute("BEGIN IMMEDIATE")
         except sqlite3.OperationalError as e:
@@ -350,8 +355,28 @@ def write_transaction(conn: sqlite3.Connection, work, patience: float = LOCK_PAT
             conn.execute("COMMIT")
             return
         except BaseException:
-            conn.execute("ROLLBACK")
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
             raise
+
+
+@contextmanager
+def transaction(conn: sqlite3.Connection, kind: str = "IMMEDIATE") -> Iterator[None]:
+    """One write transaction that is always closed: committed, or rolled back on any error.
+
+    A transaction left open after an error keeps the catalog locked for everything else.
+    """
+    if conn.in_transaction:  # left open by an earlier failure: never build on it
+        log.warning("discarding an unfinished transaction")
+        conn.execute("ROLLBACK")
+    conn.execute(f"BEGIN {kind}")
+    try:
+        yield
+        conn.execute("COMMIT")
+    except BaseException:
+        if conn.in_transaction:
+            conn.execute("ROLLBACK")
+        raise
 
 
 def setup_logging(directory: Path) -> Path:

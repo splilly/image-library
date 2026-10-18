@@ -11,6 +11,8 @@ import sqlite3
 import threading
 from pathlib import Path
 
+from .catalog import transaction
+
 SMALL = "s"   # grid thumbnail
 MEDIUM = "m"  # review preview
 
@@ -55,9 +57,8 @@ class PreviewStore:
         if not rows:
             return
         conn = self.conn
-        conn.execute("BEGIN")
-        conn.executemany("INSERT OR REPLACE INTO previews(hash, size, data) VALUES(?,?,?)", rows)
-        conn.execute("COMMIT")
+        with transaction(conn, kind="DEFERRED"):
+            conn.executemany("INSERT OR REPLACE INTO previews(hash, size, data) VALUES(?,?,?)", rows)
 
     def get(self, content_hash: bytes, size: str = SMALL) -> bytes | None:
         row = self.conn.execute(

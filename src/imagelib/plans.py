@@ -28,7 +28,7 @@ from pathlib import Path
 
 import blake3
 
-from .catalog import Catalog, bump_files_version
+from .catalog import Catalog, bump_files_version, transaction
 from .discover import mtime_equivalent, to_os_path
 from .review import VALID_DECISION
 from .volumes import QUARANTINE_DIR, VolumeRef
@@ -264,9 +264,8 @@ def _process(cat: Catalog, plan_id: int, item, root: Path, online: dict[str, Pat
     # 4. Move, journaled.
     qrel = _quarantine_rel(root, plan_id, item["rel_path"])
     dst = to_os_path(root, qrel, None)
-    conn.execute("BEGIN IMMEDIATE")
-    _set(conn, item["id"], "moving", None, qrel)
-    conn.execute("COMMIT")
+    with transaction(conn):
+        _set(conn, item["id"], "moving", None, qrel)
     try:
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         os.rename(src, dst)  # same drive: instant and atomic
@@ -274,19 +273,17 @@ def _process(cat: Catalog, plan_id: int, item, root: Path, online: dict[str, Pat
         if not present():  # leave it 'moving': the next run reconciles against the disk
             return "offline", None, None
         return _finish(conn, item, "failed", f"could not move the file: {e}")
-    conn.execute("BEGIN IMMEDIATE")
-    _set(conn, item["id"], "quarantined", None, qrel)
-    conn.execute("UPDATE files SET state = 'missing', error = ? WHERE id = ?",
-                 (f"moved to quarantine (plan {plan_id})", item["file_id"]))
-    bump_files_version(conn)
-    conn.execute("COMMIT")
+    with transaction(conn):
+        _set(conn, item["id"], "quarantined", None, qrel)
+        conn.execute("UPDATE files SET state = 'missing', error = ? WHERE id = ?",
+                     (f"moved to quarantine (plan {plan_id})", item["file_id"]))
+        bump_files_version(conn)
     return "quarantined", None, qrel
 
 
 def _finish(conn: sqlite3.Connection, item, status: str, error: str | None):
-    conn.execute("BEGIN IMMEDIATE")
-    _set(conn, item["id"], status, error)
-    conn.execute("COMMIT")
+    with transaction(conn):
+        _set(conn, item["id"], status, error)
     return status, error, None
 
 
@@ -376,17 +373,16 @@ def _reconcile(cat: Catalog, plan_id: int, online: dict[str, Path]) -> None:
             continue
         src = os.path.lexists(to_os_path(root, item["rel_path"], item["rel_path_raw"]))
         dst = item["quarantine_path"] and os.path.lexists(to_os_path(root, item["quarantine_path"], None))
-        conn.execute("BEGIN IMMEDIATE")
-        if dst and not src:
-            _set(conn, item["id"], "quarantined")
-            conn.execute("UPDATE files SET state = 'missing', error = ? WHERE id = ?",
-                         (f"moved to quarantine (plan {plan_id})", item["file_id"]))
-            bump_files_version(conn)
-        elif src and not dst:
-            _set(conn, item["id"], "pending")
-        else:
-            _set(conn, item["id"], "failed", "interrupted move; found the file in neither or both places")
-        conn.execute("COMMIT")
+        with transaction(conn):
+            if dst and not src:
+                _set(conn, item["id"], "quarantined")
+                conn.execute("UPDATE files SET state = 'missing', error = ? WHERE id = ?",
+                             (f"moved to quarantine (plan {plan_id})", item["file_id"]))
+                bump_files_version(conn)
+            elif src and not dst:
+                _set(conn, item["id"], "pending")
+            else:
+                _set(conn, item["id"], "failed", "interrupted move; found the file in neither or both places")
 
 
 # -- undo & purge ----------------------------------------------------------------------------
@@ -434,12 +430,11 @@ def restore(cat: Catalog, plan_id: int, online: dict[str, Path], item_ids: list[
         except OSError as e:
             problems.append(f"{item['rel_path']}: {e}")
             continue
-        conn.execute("BEGIN IMMEDIATE")
-        _set(conn, item["id"], "restored")
-        conn.execute("UPDATE files SET state = 'done', error = NULL WHERE id = ?", (item["file_id"],))
-        conn.execute("DELETE FROM decisions WHERE file_id = ?", (item["file_id"],))
-        bump_files_version(conn)
-        conn.execute("COMMIT")
+        with transaction(conn):
+            _set(conn, item["id"], "restored")
+            conn.execute("UPDATE files SET state = 'done', error = NULL WHERE id = ?", (item["file_id"],))
+            conn.execute("DELETE FROM decisions WHERE file_id = ?", (item["file_id"],))
+            bump_files_version(conn)
         restored += 1
     return {"restored": restored, "relayed": relayed, "problems": problems}
 
@@ -466,11 +461,10 @@ def purge(cat: Catalog, plan_id: int, online: dict[str, Path], relay: dict[str, 
         except OSError as e:
             problems.append(f"{item['rel_path']}: {e}")
             continue
-        conn.execute("BEGIN IMMEDIATE")
-        _set(conn, item["id"], "purged")
-        conn.execute("UPDATE files SET error = ? WHERE id = ?", (f"deleted permanently (plan {plan_id})",
-                                                                 item["file_id"]))
-        conn.execute("COMMIT")
+        with transaction(conn):
+            _set(conn, item["id"], "purged")
+            conn.execute("UPDATE files SET error = ? WHERE id = ?", (f"deleted permanently (plan {plan_id})",
+                                                                     item["file_id"]))
         purged += 1
         freed += item["size"]
         touched.add((str(root), item["volume_id"]))

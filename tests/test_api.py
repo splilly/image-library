@@ -345,7 +345,8 @@ def test_filter_counts_follow_the_other_filters(scanned):
     api, vid, root, rel = scanned
     for active in ({}, {"kind": "image"}, {"year": "2004"}, {"year": "unknown"}, {"camera": "Canon EOS 10D"},
                    {"size": "small", "unique": "1"}, {"status": "corrupt"}, {"q": "2004", "month": "07"},
-                   {"volume": vid, "folder": "photos"}):
+                   {"volume": vid, "folder": "photos"}, {"camera": "unknown"}, {"month": "unknown"},
+                   {"size": "unknown"}, {"year": "2004", "month": "unknown"}, {"status": "sidecar"}):
         facets = api.get("/api/facets", params=active).json()
         for facet, param in FACET_PARAMS.items():
             for option in facets[facet]:
@@ -399,3 +400,32 @@ def test_filter_counts_catch_up_with_catalog_changes(scanned, tmp_path):
     while idx.facets(cat) == before and time.monotonic() < deadline:
         time.sleep(0.05)
     assert idx.facets(cat) != before
+
+
+def test_unknown_options_cover_what_files_do_not_tell(scanned):
+    """Checked files without a camera, date or readable size are under "unknown" for that filter."""
+    api, vid, root, rel = scanned
+    facets = api.get("/api/facets").json()
+    for facet, param in (("cameras", "camera"), ("months", "month"), ("sizes", "size"), ("years", "year")):
+        unknown = next(o for o in facets[facet] if o["name"] == "unknown")
+        found = all_files(api, **{param: "unknown"})
+        assert unknown["count"] == len(found) > 0, facet
+        assert all(i["state"] == "done" for i in found)  # not-yet-scanned files are not "unknown"
+    assert all(not i["camera"] for i in all_files(api, camera="unknown"))
+    assert all(not (i["width"] and i["height"]) for i in all_files(api, size="unknown"))
+    assert all(not (i["taken_at"] or "")[5:7].isdigit() for i in all_files(api, month="unknown"))
+
+
+def test_a_camera_named_unknown_is_unknown(scanned, tmp_path):
+    from imagelib.catalog import Catalog
+
+    api, vid, root, rel = scanned
+    cat = Catalog.shared(tmp_path / "catalog")
+    before = next(o["count"] for o in api.get("/api/facets").json()["cameras"] if o["name"] == "unknown")
+    cat.conn.execute("UPDATE contents SET camera_model = 'unknown' WHERE hash = (SELECT content_hash FROM files "
+                     "WHERE rel_path = ?)", (rel["photo1"],))
+    from imagelib import queries
+    cameras = queries.FacetIndex().facets(cat)["cameras"]
+    assert [o["name"] for o in cameras].count("unknown") == 1
+    unknown = next(o["count"] for o in cameras if o["name"] == "unknown")
+    assert unknown == len(all_files(api, camera="unknown")) == before + 2  # photo1 and its copy

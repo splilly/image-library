@@ -223,10 +223,16 @@ def test_analyzer_upgrades_reread_only_the_results_they_affect(drive, catalog):
     root, rel = drive
     vid = register(catalog, root)
     scan(catalog, root, vid)
-    # As if analyzed by v4: v5 (pixel hashes) affects intact stills only, not damaged files or videos.
-    catalog.conn.execute("UPDATE contents SET analyzer_version=4")
-    stale = {r[0] for r in catalog.conn.execute(f"SELECT kind || ':' || status FROM contents WHERE {STALE_CONTENT}")}
-    assert stale == {"image:ok", "psd:ok"}
+    def stale_after(version):
+        catalog.conn.execute("UPDATE contents SET analyzer_version=?", (version,))
+        return {r[0] for r in catalog.conn.execute(f"SELECT kind || ':' || status FROM contents WHERE {STALE_CONTENT}")}
+
+    corrupt = {r[0] for r in catalog.conn.execute("SELECT kind || ':corrupt' FROM contents WHERE status='corrupt'")}
+    assert corrupt
+    # v6 (macOS metadata files) re-checks only what was reported corrupt.
+    assert stale_after(5) == corrupt
+    # v5 (pixel hashes) affects intact stills only, not videos.
+    assert stale_after(4) == {"image:ok", "psd:ok"} | corrupt
 
 
 def test_writes_wait_out_a_busy_catalog(tmp_path):

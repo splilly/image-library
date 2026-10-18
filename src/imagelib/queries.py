@@ -16,6 +16,7 @@ import numpy as np
 from .catalog import Catalog, to_unsigned64
 
 PROBLEM_STATUSES = ("corrupt", "warning", "unsupported")
+SIDECAR = "sidecar"  # macOS metadata files: hidden everywhere unless asked for (status=sidecar)
 
 # sort name -> (SQL expressions forming the key, descending?)
 _SORTS = {
@@ -34,12 +35,13 @@ class FileFilter:
     status: str | None = None     # ok | warning | corrupt | unsupported | problems | duplicates
                                   # | read_error | pending | missing
     kind: str | None = None
-    camera: str | None = None
-    year: str | None = None       # "2004", or UNKNOWN_YEAR for pictures without a usable date
-    month: str | None = None      # "01".."12"; with a year that month of that year, alone that month of any year
+    camera: str | None = None     # a camera model, or UNKNOWN for pictures that do not name one
+    year: str | None = None       # "2004", or UNKNOWN for pictures without a usable date
+    month: str | None = None      # "01".."12" or UNKNOWN; with a year that month of that year, alone that
+                                  # month of any year
     text: str | None = None       # substring of the path
     unique: bool = False          # one row per unique content
-    size: str | None = None       # a SIZES key: pixel size of the longer side
+    size: str | None = None       # a SIZES key (pixel size of the longer side), or UNKNOWN
 
     def path_clauses(self) -> tuple[list[str], list]:
         """The conditions on where a file is and what it is called (need only the files table)."""
@@ -72,6 +74,8 @@ class FileFilter:
             args.append(status)
         else:
             clauses.append("f.state != 'missing'")
+            if status != SIDECAR:
+                clauses.append(f"coalesce(c.status, '') != '{SIDECAR}'")
             if status == "duplicates":
                 clauses.append("EXISTS (SELECT 1 FROM files f4 WHERE f4.content_hash = f.content_hash "
                                "AND f4.id != f.id AND f4.state != 'missing')")
@@ -84,12 +88,19 @@ class FileFilter:
         if self.kind:
             clauses.append("f.kind = ?")
             args.append(self.kind)
-        if self.camera:
+        # UNKNOWN for a value means: checked, but the file does not tell (not merely not scanned yet).
+        if self.camera == UNKNOWN:  # a camera that calls itself "unknown" is that too
+            clauses.append(f"c.hash IS NOT NULL AND coalesce(c.camera_model, '{UNKNOWN}') = '{UNKNOWN}'")
+        elif self.camera:
             clauses.append("c.camera_model = ?")
             args.append(self.camera)
-        if self.year == UNKNOWN_YEAR:
-            # Analysed, but no usable date (not merely not scanned yet).
+        if self.year == UNKNOWN:
             clauses.append(f"c.hash IS NOT NULL AND NOT coalesce(c.taken_at GLOB '{DATED}', 0)")
+        elif self.month == UNKNOWN:
+            clauses.append(f"c.hash IS NOT NULL AND NOT coalesce(c.taken_at GLOB '{MONTHED}', 0)")
+            if self.year:
+                clauses.append("c.taken_at >= ? AND c.taken_at < ?")
+                args += [self.year, str(int(self.year) + 1)]
         elif self.year and self.month:
             y, m = int(self.year), int(self.month)
             clauses.append("c.taken_at >= ? AND c.taken_at < ?")
@@ -100,7 +111,9 @@ class FileFilter:
         elif self.month:
             clauses.append("c.taken_at GLOB '[12][0-9][0-9][0-9]-*' AND substr(c.taken_at, 6, 2) = ?")
             args.append(f"{int(self.month):02d}")
-        if self.size in SIZES:
+        if self.size == UNKNOWN:
+            clauses.append(f"c.hash IS NOT NULL AND coalesce({LONG_SIDE}, 0) < 1")
+        elif self.size in SIZES:
             low, high = SIZES[self.size]
             clauses.append(f"{LONG_SIDE} >= ?" + (f" AND {LONG_SIDE} < ?" if high else ""))
             args += [low, high] if high else [low]
@@ -110,8 +123,9 @@ class FileFilter:
         return " AND ".join(clauses) or "1", args
 
 
-UNKNOWN_YEAR = "unknown"
+UNKNOWN = "unknown"
 DATED = "[12][0-9][0-9][0-9]*"   # taken_at values that start with a year
+MONTHED = "[12][0-9][0-9][0-9]-[01][0-9]*"  # ... and a month
 LONG_SIDE = "max(c.width, c.height)"  # NULL when the size is not known (not scanned, unreadable)
 # size filter -> pixels on the longer side, [low, high); high None = no upper limit
 SIZES: dict[str, tuple[int, int | None]] = {
@@ -237,7 +251,7 @@ _FACET_ROWS = f"""
 SELECT f.id, f.volume_id, f.kind, f.state, c.rowid, c.status, c.camera_model,
        CASE WHEN c.taken_at GLOB '{DATED}' THEN CAST(substr(c.taken_at, 1, 4) AS INTEGER)
             WHEN c.hash IS NOT NULL THEN {_UNDATED} ELSE {_NO_CONTENT} END,
-       CASE WHEN c.taken_at GLOB '[12][0-9][0-9][0-9]-[01][0-9]*' THEN CAST(substr(c.taken_at, 6, 2) AS INTEGER)
+       CASE WHEN c.taken_at GLOB '{MONTHED}' THEN CAST(substr(c.taken_at, 6, 2) AS INTEGER)
             ELSE 0 END,
        {LONG_SIDE}
 FROM files f INDEXED BY files_hash LEFT JOIN contents c ON c.hash = f.content_hash
@@ -267,7 +281,7 @@ class _FacetData:
         self.state = _Codes(cols[3])
         content = np.array([-1 if c is None else c for c in cols[4]], dtype=np.int64)
         self.status = _Codes(cols[5])
-        self.camera = _Codes(cols[6])
+        self.camera = _Codes([None if v == UNKNOWN else v for v in cols[6]])
         self.year = np.array(cols[7], dtype=np.int32)
         self.month = np.array(cols[8], dtype=np.int8)
         side = np.array([0 if v is None else v for v in cols[9]], dtype=np.int64)
@@ -299,6 +313,8 @@ class _FacetData:
             m &= self.state.codes == self.state.code(status)
         else:
             m &= self.present
+            if status != SIDECAR:
+                m &= self.status.codes != self.status.code(SIDECAR)
             if status == "duplicates":
                 m &= self.duplicated
             elif status == "problems":
@@ -308,17 +324,24 @@ class _FacetData:
                 m &= self.status.codes == self.status.code(status)
         if flt.kind:
             m &= self.kind.codes == self.kind.code(flt.kind)
-        if flt.camera:
+        checked = self.year != _NO_CONTENT
+        if flt.camera == UNKNOWN:
+            m &= checked & (self.camera.codes == -1)
+        elif flt.camera:
             m &= self.camera.codes == self.camera.code(flt.camera)
-        if flt.year == UNKNOWN_YEAR:
+        if flt.year == UNKNOWN:
             m &= self.year == _UNDATED
         elif flt.year:
             m &= self.year == int(flt.year)
-        if flt.month and flt.year != UNKNOWN_YEAR:
+        if flt.month == UNKNOWN and flt.year != UNKNOWN:
+            m &= checked & (self.month == 0)
+        elif flt.month and flt.year != UNKNOWN:
             m &= self.month == int(flt.month)
             if not flt.year:
                 m &= self.year >= 0
-        if flt.size in SIZES:
+        if flt.size == UNKNOWN:
+            m &= checked & (self.bucket == -1)
+        elif flt.size in SIZES:
             low, high = SIZES[flt.size]
             m &= self.bucket >= _SIZE_STEPS.index(low)
             if high:
@@ -413,23 +436,30 @@ class FacetIndex:
         def by_name(codes: _Codes, m: np.ndarray) -> dict:
             return {codes.names[i]: n for i, n in tally(codes.codes, m).items()}
 
-        years = tally(d.year, masks["years"] & (d.year != _NO_CONTENT), offset=1)
-        months = tally(d.month.astype(np.int32), masks["months"] & (d.year >= 0))
-        buckets = tally(d.bucket.astype(np.int32), masks["sizes"])
+        checked = d.year != _NO_CONTENT
+        years = tally(d.year, masks["years"] & checked, offset=1)
+        months = tally(d.month.astype(np.int32), masks["months"] & checked)
+        buckets = tally(d.bucket.astype(np.int32), masks["sizes"] & checked, offset=1)  # -1: unknown
         sizes = {}
         for name, (low, high) in SIZES.items():
             sizes[name] = sum(n for b, n in buckets.items()
-                              if _SIZE_STEPS[b] >= low and (high is None or _SIZE_STEPS[b] < high))
+                              if b >= 0 and _SIZE_STEPS[b] >= low and (high is None or _SIZE_STEPS[b] < high))
+        no_camera = int(np.count_nonzero(masks["cameras"] & checked & (d.camera.codes == -1)))
         desc = lambda kv: (-kv[1], kv[0])  # noqa: E731
+
+        def listed(items, unknown: int = 0) -> list[dict]:
+            """Options with their counts, then "unknown" (checked, but the file does not tell) if any."""
+            return [{"name": k, "count": v} for k, v in items] + \
+                ([{"name": UNKNOWN, "count": unknown}] if unknown else [])
+
         return {
-            "volumes": [{"name": k, "count": v} for k, v in sorted(by_name(d.volume, masks["volumes"]).items())],
-            "kinds": [{"name": k, "count": v} for k, v in sorted(by_name(d.kind, masks["kinds"]).items(), key=desc)],
-            "cameras": [{"name": k, "count": v}
-                        for k, v in sorted(by_name(d.camera, masks["cameras"]).items(), key=desc)],
-            "years": [{"name": str(y), "count": n} for y, n in sorted(years.items()) if y >= 0]
-                     + ([{"name": UNKNOWN_YEAR, "count": years[_UNDATED]}] if years.get(_UNDATED) else []),
-            "months": [{"name": f"{m:02d}", "count": n} for m, n in sorted(months.items()) if m > 0],
-            "sizes": [{"name": k, "count": v} for k, v in sizes.items()],
+            "volumes": listed(sorted(by_name(d.volume, masks["volumes"]).items())),
+            "kinds": listed(sorted(by_name(d.kind, masks["kinds"]).items(), key=desc)),
+            "cameras": listed(sorted(by_name(d.camera, masks["cameras"]).items(), key=desc), no_camera),
+            "years": listed(((str(y), n) for y, n in sorted(years.items()) if y >= 0), years.get(_UNDATED, 0)),
+            "months": [] if flt.year == UNKNOWN else  # no date, no month: the month filter does not apply
+                      listed(((f"{m:02d}", n) for m, n in sorted(months.items()) if m > 0), months.get(0, 0)),
+            "sizes": listed(sizes.items(), buckets.get(-1, 0)),
         }
 
 

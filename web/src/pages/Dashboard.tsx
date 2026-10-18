@@ -43,6 +43,11 @@ export default function Dashboard({ scan }: { scan: ScanState | null }) {
           <Tile label="Unreadable" value={count(s.read_errors + s.unsupported)}
             tone={s.read_errors ? "bad" : undefined} onClick={() => navigate("library", { status: "problems" })} />
           <Tile label="Not yet scanned" value={count(s.pending)} />
+          {s.sidecar_files > 0 && (
+            <Tile label="macOS metadata files" value={count(s.sidecar_files)}
+              sub={`${bytes(s.sidecar_bytes)} · not pictures, left out`}
+              onClick={() => navigate("library", { status: "sidecar" })} />
+          )}
         </div>
       )}
 

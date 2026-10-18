@@ -13,6 +13,8 @@ export interface Summary {
   duplicate_groups: number;
   redundant_copies: number;
   redundant_bytes: number;
+  sidecar_files: number; // macOS metadata files ("._name"): not pictures, left out of the other numbers
+  sidecar_bytes: number;
   catalog_dir: string;
   unfinished_scans: { volume_id: string; label: string; subpath: string; state: string; message: string | null }[];
 }

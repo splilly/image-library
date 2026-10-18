@@ -17,6 +17,7 @@ const STATUSES: [string, string][] = [
   ["ok", "OK"],
   ["pending", "Not yet scanned"],
   ["missing", "Missing (deleted or moved)"],
+  ["sidecar", "macOS metadata files (not pictures)"],
 ];
 const SORTS: [string, string][] = [
   ["path", "Folder order"],
@@ -25,12 +26,16 @@ const SORTS: [string, string][] = [
   ["size_desc", "Largest first"],
 ];
 const KIND_LABEL: Record<string, string> = { image: "Images", raw: "RAW", psd: "Photoshop", video: "Videos" };
+// Option for values a checked file does not tell (no camera in the metadata, no date, unreadable size).
+const UNKNOWN = "unknown";
+const optionName = (name: string) => (name === UNKNOWN ? "Unknown" : name);
 // Pixel size of the longer side (album art is typically 300-600 px, icons and sprites smaller).
 const SIZES: [string, string][] = [
   ["normal", "800 px or larger"],
   ["large", "1600 px or larger"],
   ["small", "Smaller than 800 px"],
   ["tiny", "Smaller than 256 px"],
+  [UNKNOWN, "Unknown"],
 ];
 const PARAMS = ["volume", "folder", "status", "kind", "camera", "year", "month", "q", "sort", "unique", "flat",
   "size"] as const;
@@ -198,22 +203,24 @@ export default function Library({ params }: { params: URLSearchParams }) {
           </select>
           <select value={query.camera ?? ""} onChange={(e) => setParam({ camera: e.target.value || undefined })}>
             <option value="">Any camera</option>
-            {withChosen(facets.data?.cameras, query.camera).map((c) => <option key={c.name} value={c.name}>{c.name} ({count(c.count)})</option>)}
+            {withChosen(facets.data?.cameras, query.camera).map((c) => (
+              <option key={c.name} value={c.name}>{optionName(c.name)} ({count(c.count)})</option>
+            ))}
           </select>
           <select value={query.year ?? ""} aria-label="Year"
             onChange={(e) => setParam({ year: e.target.value || undefined,
-                                        month: e.target.value === "unknown" ? undefined : query.month })}>
+                                        month: e.target.value === UNKNOWN ? undefined : query.month })}>
             <option value="">Any year</option>
             {withChosen(facets.data?.years, query.year).map((y) => (
-              <option key={y.name} value={y.name}>{y.name === "unknown" ? "Unknown" : y.name} ({count(y.count)})</option>
+              <option key={y.name} value={y.name}>{optionName(y.name)} ({count(y.count)})</option>
             ))}
           </select>
-          <select value={query.year === "unknown" ? "" : query.month ?? ""} disabled={query.year === "unknown"}
+          <select value={query.year === UNKNOWN ? "" : query.month ?? ""} disabled={query.year === UNKNOWN}
             onChange={(e) => setParam({ month: e.target.value || undefined })}
             aria-label="Month" title={query.year ? `Months of ${query.year}` : "This month in any year"}>
             <option value="">Any month</option>
-            {MONTHS.map((name, i) => {
-              const value = String(i + 1).padStart(2, "0");
+            {[...MONTHS, "Unknown"].map((name, i) => {
+              const value = i < 12 ? String(i + 1).padStart(2, "0") : UNKNOWN;
               const n = facets.data?.months.find((m) => m.name === value)?.count;
               return (
                 <option key={value} value={value} disabled={facets.data ? !n && query.month !== value : false}>

@@ -396,8 +396,8 @@ def create_app(catalog_dir: Path, workers: int | None = None, auto_relate: bool 
     def file_filter(volume: str | None = None, folder: str = "", recursive: bool = True,
                     status: str | None = None, kind: str | None = None, camera: str | None = None,
                     year: str | None = None, q: str | None = None, unique: bool = False,
-                    month: str | None = Query(None, pattern=r"^(0?[1-9]|1[0-2])$"),
-                    size: str | None = Query(None, pattern="^(" + "|".join(queries.SIZES) + ")$"),
+                    month: str | None = Query(None, pattern=r"^(0?[1-9]|1[0-2]|unknown)$"),
+                    size: str | None = Query(None, pattern="^(" + "|".join([*queries.SIZES, queries.UNKNOWN]) + ")$"),
                     ) -> queries.FileFilter:
         """The library's filters, shared by the listing, its count and the filter counts."""
         return queries.FileFilter(volume_id=volume or None, folder=folder, recursive=recursive,
@@ -423,7 +423,7 @@ def create_app(catalog_dir: Path, workers: int | None = None, auto_relate: bool 
         return facet_index.facets(cat(), flt)
 
     def _valid_year(year: str | None) -> str | None:
-        if year and year != queries.UNKNOWN_YEAR and not (len(year) == 4 and year.isdigit()):
+        if year and year != queries.UNKNOWN and not (len(year) == 4 and year.isdigit()):
             raise HTTPException(422, "year must be like 2004, or 'unknown'")
         return year or None
 

@@ -7,6 +7,7 @@ import pytest
 from conftest import file_row, scan
 
 from imagelib import fsid, volumes
+from imagelib.catalog import SCHEMA_VERSION
 from imagelib.fsid import SERIAL32, FsIdentity
 
 TB = 1000 ** 4
@@ -134,7 +135,7 @@ def test_old_catalogs_are_upgraded(tmp_path):
     conn.close()
 
     cat = Catalog(path)
-    assert cat.conn.execute("PRAGMA user_version").fetchone()[0] == 9
+    assert cat.conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     row = cat.get_volume("v1")
     assert row["label"] == "Old drive" and row["read_only"] == 0
 

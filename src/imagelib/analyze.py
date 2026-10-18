@@ -27,10 +27,12 @@ from . import formats, phash
 #   3: perceptual hashes for damaged images, so intact originals can be found.
 #   4: JPEGs zero-padded after their end marker are no longer flagged as cut short.
 #   5: pixel hash, to find the same picture saved with different metadata.
-ANALYZER_VERSION = 5
+#   6: macOS metadata files (AppleDouble) recognised by content instead of reported corrupt.
+ANALYZER_VERSION = 6
 STALE_CONTENT = ("(analyzer_version < 2 OR (analyzer_version < 3 AND status != 'ok') "
                  "OR (analyzer_version < 4 AND status = 'warning') "
-                 "OR (analyzer_version < 5 AND kind != 'video' AND status = 'ok'))")
+                 "OR (analyzer_version < 5 AND kind != 'video' AND status = 'ok') "
+                 "OR (analyzer_version < 6 AND status = 'corrupt'))")
 
 SMALL_EDGE = 320
 MEDIUM_EDGE = 1024
@@ -41,6 +43,11 @@ OK = "ok"
 WARNING = "warning"
 CORRUPT = "corrupt"
 UNSUPPORTED = "unsupported"
+SIDECAR = "sidecar"  # not a picture at all: a macOS metadata file named like one
+
+# AppleDouble / AppleSingle: what macOS writes as "._name" next to files on non-Mac drives.
+APPLE_DOUBLE_MAGIC = (b"\x00\x05\x16\x07", b"\x00\x05\x16\x00")
+SIDECAR_PROBLEM = "macOS metadata file (AppleDouble), not a picture"
 
 
 @dataclass
@@ -173,6 +180,10 @@ def analyze(job: Job) -> Result:
     result = Result()
     reserved = _gate.reserve(_estimate_decode_bytes(job)) if _gate else 0
     try:
+        if _head(job, 4) in APPLE_DOUBLE_MAGIC:
+            result.status = SIDECAR
+            result.problems.append(SIDECAR_PROBLEM)
+            return result
         if job.kind == formats.VIDEO:
             _analyze_video(job, result)
         else:
@@ -195,6 +206,13 @@ def analyze(job: Job) -> Result:
             _gate.release(reserved)
         result.seconds = time.perf_counter() - started
     return result
+
+
+def _head(job: Job, n: int) -> bytes:
+    if job.data is not None:
+        return job.data[:n]
+    with open(job.path, "rb") as f:
+        return f.read(n)
 
 
 def ping() -> bool:

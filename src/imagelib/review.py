@@ -226,6 +226,7 @@ def refresh_duplicates(cat: Catalog, force: bool = False, busy: bool = False) ->
                 SELECT content_hash, sum(n), count(*), max(n), max(size) FROM (
                     SELECT content_hash, volume_id, count(*) AS n, max(size) AS size FROM files
                     WHERE content_hash IS NOT NULL AND state != 'missing'
+                    AND content_hash NOT IN (SELECT hash FROM contents WHERE status = 'sidecar')
                     GROUP BY content_hash, volume_id)
                 GROUP BY content_hash HAVING sum(n) > 1""")
         conn.execute("CREATE INDEX temp.new_dup_groups_hash ON new_dup_groups(hash)")

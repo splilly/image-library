@@ -25,7 +25,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -316,6 +316,16 @@ _MIGRATIONS = {
         UNIQUE (export_id, dest)
     );
     CREATE INDEX export_items_status ON export_items(export_id, status);
+    """,
+    10: """
+    -- macOS metadata files ("._name", AppleDouble) that earlier versions reported as corrupt
+    -- pictures. Healthy pictures that happen to be named "._" keep their status. New ones are
+    -- recognised by content when scanned (analyze.SIDECAR, same wording).
+    UPDATE contents SET status = 'sidecar', problems = 'macOS metadata file (AppleDouble), not a picture'
+    WHERE status = 'corrupt' AND hash IN (
+        SELECT content_hash FROM files WHERE content_hash IS NOT NULL
+        AND lower(substr(rel_path, length(rtrim(rel_path, replace(rel_path, '/', ''))) + 1)) GLOB '._*');
+    UPDATE meta SET value = CAST(value AS INTEGER) + 1 WHERE key = 'files_version';
     """,
 }
 
@@ -668,15 +678,23 @@ class Catalog:
             "sum(state='missing') FROM files"
         ).fetchone()
         contents = c.execute(
-            "SELECT count(*), sum(status='corrupt'), sum(status='warning'), sum(status='unsupported') FROM contents"
+            "SELECT count(*), sum(status='corrupt'), sum(status='warning'), sum(status='unsupported') FROM contents "
+            "WHERE status != 'sidecar'"
+        ).fetchone()
+        # macOS metadata files are not pictures: counted apart (few contents, found by the status index).
+        sidecars = c.execute(
+            "SELECT count(*), coalesce(sum(f.size), 0) FROM contents s JOIN files f ON f.content_hash = s.hash "
+            "WHERE s.status = 'sidecar' AND f.state != 'missing'"
         ).fetchone()
         dup = c.execute(
             "SELECT count(*), coalesce(sum(n-1),0), coalesce(sum((n-1)*size),0) FROM "
             "(SELECT count(*) AS n, max(size) AS size FROM files WHERE content_hash IS NOT NULL "
-            "AND state='done' GROUP BY content_hash HAVING n>1)"
+            "AND state='done' AND content_hash NOT IN (SELECT hash FROM contents WHERE status = 'sidecar') "
+            "GROUP BY content_hash HAVING n>1)"
         ).fetchone() if include_duplicates else (None, None, None)
         return {
-            "files": files[0], "bytes": files[1], "pending": files[2] or 0,
+            "files": files[0] - sidecars[0], "bytes": files[1] - sidecars[1], "pending": files[2] or 0,
+            "sidecar_files": sidecars[0], "sidecar_bytes": sidecars[1],
             "read_errors": files[3] or 0, "missing": files[4] or 0,
             "unique_contents": contents[0], "corrupt": contents[1] or 0,
             "warnings": contents[2] or 0, "unsupported": contents[3] or 0,

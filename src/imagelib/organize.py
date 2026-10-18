@@ -61,7 +61,7 @@ def _selection(cat: Catalog, opts: Options) -> list:
         f"""SELECT c.hash, c.kind, c.status, c.taken_at, c.size,
                    (SELECT min(f.mtime_ns) FROM files f WHERE f.content_hash = c.hash AND f.state != 'missing') AS mtime
             FROM contents c
-            WHERE c.kind IN ({','.join('?' * len(kinds))})
+            WHERE c.kind IN ({','.join('?' * len(kinds))}) AND c.status != 'sidecar'
             AND {survives('c.hash')}
             {'' if opts.include_damaged else "AND c.status != 'corrupt'"}
             AND NOT EXISTS (SELECT 1 FROM similar_pairs p JOIN contents o ON o.hash = p.b

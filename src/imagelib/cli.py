@@ -228,6 +228,9 @@ def cmd_status(args) -> int:
     print(f"  corrupt:        {s['corrupt']:,}")
     print(f"  warnings:       {s['warnings']:,}")
     print(f"  unsupported:    {s['unsupported']:,}")
+    if s["sidecar_files"]:
+        print(f"macOS metadata files (not pictures, left out above): {s['sidecar_files']:,} "
+              f"({human_bytes(s['sidecar_bytes'])})")
     print(f"Exact duplicates: {s['duplicate_groups']:,} groups, {s['redundant_copies']:,} extra copies "
           f"({human_bytes(s['redundant_bytes'])})")
     scans = cat.unfinished_scans()

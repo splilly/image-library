@@ -253,7 +253,8 @@ def create_app(catalog_dir: Path, workers: int | None = None, auto_relate: bool 
     def storage():
         # Counting previews scans their table: refresh that part at most once a minute.
         now = time.monotonic()
-        fresh = cat().storage(count_previews=now - storage_cache.get("at", 0) > 60)
+        stale = "at" not in storage_cache or now - storage_cache["at"] > 60
+        fresh = cat().storage(count_previews=stale)
         if fresh["preview_counts"] is None:
             fresh["preview_counts"] = storage_cache.get("counts")
         else:

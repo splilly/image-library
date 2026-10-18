@@ -536,7 +536,9 @@ class Catalog:
             out["disk_free"], out["disk_total"] = usage.free, usage.total
         except OSError:
             out["disk_free"] = out["disk_total"] = None
-        if count_previews and self.previews_path.exists():
+        if count_previews and not self.previews_path.exists():
+            out["preview_counts"] = {}
+        elif count_previews:
             conn = sqlite3.connect(self.previews_path, timeout=60)
             try:
                 out["preview_counts"] = dict(conn.execute("SELECT size, count(*) FROM previews GROUP BY size"))

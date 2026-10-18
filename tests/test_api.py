@@ -319,3 +319,15 @@ def test_unknown_year_shows_pictures_without_a_date(scanned):
     assert dated + unknown["count"] == api.get("/api/summary").json()["unique_contents"]
     assert api.get("/api/facets", params={"year": "unknown"}).json()["months"] == []
     assert api.get("/api/files", params={"year": "20x4"}).status_code == 422
+
+
+def test_storage_shows_catalog_size(scanned):
+    api, vid, root, rel = scanned
+    st = api.get("/api/storage").json()
+    assert st["database"] > 0 and st["previews"] > 0 and st["total"] >= st["database"] + st["previews"]
+    from imagelib.catalog import Catalog
+
+    with_preview = Catalog.shared(api.app.state.access.catalog_dir).conn.execute(
+        "SELECT count(*) FROM contents WHERE has_preview = 1").fetchone()[0]
+    assert st["preview_counts"] == {"s": with_preview, "m": with_preview}
+    assert st["disk_free"] > 0 and st["disk_total"] >= st["disk_free"]

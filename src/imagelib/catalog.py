@@ -519,6 +519,33 @@ class Catalog:
         ).fetchone()
         return {k: (row[k] or 0) for k in row.keys()}
 
+    def storage(self, count_previews: bool = True) -> dict:
+        """Disk space used by the catalog: database, previews, other files, and room left."""
+        import shutil
+
+        def size(*names: str) -> int:
+            return sum((self.dir / n).stat().st_size for n in names if (self.dir / n).exists())
+
+        database = size("catalog.db", "catalog.db-wal", "catalog.db-shm")
+        previews = size("previews.db", "previews.db-wal", "previews.db-shm")
+        everything = sum(p.stat().st_size for p in self.dir.iterdir() if p.is_file())
+        out = {"dir": str(self.dir), "database": database, "previews": previews,
+               "other": everything - database - previews, "total": everything, "preview_counts": None}
+        try:
+            usage = shutil.disk_usage(self.dir)
+            out["disk_free"], out["disk_total"] = usage.free, usage.total
+        except OSError:
+            out["disk_free"] = out["disk_total"] = None
+        if count_previews and self.previews_path.exists():
+            conn = sqlite3.connect(self.previews_path, timeout=60)
+            try:
+                out["preview_counts"] = dict(conn.execute("SELECT size, count(*) FROM previews GROUP BY size"))
+            except sqlite3.Error:
+                pass
+            finally:
+                conn.close()
+        return out
+
     def summary(self) -> dict:
         c = self.conn
         files = c.execute(

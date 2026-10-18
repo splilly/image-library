@@ -17,6 +17,17 @@ export interface Summary {
   unfinished_scans: { volume_id: string; label: string; subpath: string; state: string; message: string | null }[];
 }
 
+export interface Storage {
+  dir: string;
+  database: number;
+  previews: number;
+  other: number;
+  total: number;
+  preview_counts: { s?: number; m?: number } | null;
+  disk_free: number | null;
+  disk_total: number | null;
+}
+
 export interface VolumeStats {
   files: number;
   bytes: number;
@@ -495,6 +506,7 @@ function qs(params: Record<string, string | number | boolean | undefined | null>
 
 export const api = {
   summary: () => request<Summary>("GET", "/api/summary"),
+  storage: () => request<Storage>("GET", "/api/storage"),
   volumes: (refresh = false) => request<Volume[]>("GET", `/api/volumes${qs({ refresh })}`),
   addVolume: (path: string, label: string, read_only: boolean) =>
     request<{ id: string }>("POST", "/api/volumes", { path, label: label || null, read_only }),

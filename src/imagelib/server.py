@@ -247,6 +247,19 @@ def create_app(catalog_dir: Path, workers: int | None = None, auto_relate: bool 
 
     # -- overview ----------------------------------------------------------
 
+    storage_cache: dict = {}
+
+    @app.get("/api/storage")
+    def storage():
+        # Counting previews scans their table: refresh that part at most once a minute.
+        now = time.monotonic()
+        fresh = cat().storage(count_previews=now - storage_cache.get("at", 0) > 60)
+        if fresh["preview_counts"] is None:
+            fresh["preview_counts"] = storage_cache.get("counts")
+        else:
+            storage_cache.update(at=now, counts=fresh["preview_counts"])
+        return fresh
+
     @app.get("/api/summary")
     def summary():
         c = cat()

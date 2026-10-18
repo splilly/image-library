@@ -386,3 +386,5 @@ kbd { font: 11px ui-monospace, Menlo, monospace; border: 1px solid var(--border)
 .organize-new { display: grid; gap: 10px; }
 .organize-new > .btn { justify-self: start; }
 .scan-bottleneck { margin-top: 6px; color: var(--muted); }
+.storage-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
+.storage-low { border-color: var(--warn); }

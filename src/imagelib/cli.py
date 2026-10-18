@@ -210,7 +210,13 @@ def cmd_scan(args) -> int:
 def cmd_status(args) -> int:
     cat = open_catalog(args)
     s = cat.summary()
+    st = cat.storage()
     print(f"Catalog:          {cat.dir}")
+    print(f"  database:       {human_bytes(st['database'])}")
+    counts = st["preview_counts"] or {}
+    print(f"  previews:       {human_bytes(st['previews'])} ({counts.get('s', 0):,} small, {counts.get('m', 0):,} large)")
+    if st["disk_free"] is not None:
+        print(f"  free on disk:   {human_bytes(st['disk_free'])} of {human_bytes(st['disk_total'])}")
     print(f"Files:            {s['files']:,} ({human_bytes(s['bytes'])})")
     print(f"  pending:        {s['pending']:,}")
     print(f"  read errors:    {s['read_errors']:,}")

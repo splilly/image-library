@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, type ScanState } from "../api";
+import { api, type ScanState, type Storage } from "../api";
 import { Empty, ErrorNote, OnlineDot } from "../components/Bits";
 import { Icon } from "../components/Icon";
 import { ScanProgress } from "../components/ScanProgress";
@@ -8,14 +8,16 @@ import { bytes, count, navigate, useInterval, useLoad } from "../util";
 export default function Dashboard({ scan }: { scan: ScanState | null }) {
   const summary = useLoad(() => api.summary(), []);
   const vols = useLoad(() => api.volumes(), []);
+  const storage = useLoad(() => api.storage(), []);
   const [actionError, setActionError] = useState<string | null>(null);
   const running = !!scan?.running;
 
   // Totals move while scanning: refresh them every few seconds, and once when a scan ends.
   useInterval(() => { summary.reload(); vols.reload(); }, 4000, running);
+  useInterval(() => storage.reload(), 15000, running);
   const wasRunning = useRef(running);
   useEffect(() => {
-    if (wasRunning.current && !running) { summary.reload(); vols.reload(); }
+    if (wasRunning.current && !running) { summary.reload(); vols.reload(); storage.reload(); }
     wasRunning.current = running;
   }, [running]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -115,8 +117,44 @@ export default function Dashboard({ scan }: { scan: ScanState | null }) {
           </tbody>
         </table>
       </section>
-      {s && <p className="muted small">Catalog: <code>{s.catalog_dir}</code></p>}
+      {storage.data && <StoragePanel st={storage.data} images={s?.unique_contents ?? 0} />}
     </div>
+  );
+}
+
+/** How much room the catalog takes, so it can be watched as the library grows. */
+function StoragePanel({ st, images }: { st: Storage; images: number }) {
+  const small = st.preview_counts?.s ?? 0;
+  const large = st.preview_counts?.m ?? 0;
+  const perImage = images ? (st.database + st.previews) / images : 0;
+  const low = st.disk_free !== null && st.disk_total !== null &&
+    (st.disk_free < 10 * 1024 ** 3 || st.disk_free < 0.05 * st.disk_total);
+  return (
+    <section className={`panel storage ${low ? "storage-low" : ""}`}>
+      <div className="panel-head"><h2>Storage</h2><span className="muted small">{bytes(st.total)} in total</span></div>
+      <div className="storage-grid">
+        <div><div className="tile-value">{bytes(st.database)}</div><div className="tile-label">Database</div></div>
+        <div>
+          <div className="tile-value">{bytes(st.previews)}</div>
+          <div className="tile-label">Previews</div>
+          <div className="tile-sub">{count(small)} small · {count(large)} large
+            {small ? ` · ${bytes(st.previews / small)} per picture` : ""}</div>
+        </div>
+        {st.disk_free !== null && (
+          <div>
+            <div className="tile-value">{bytes(st.disk_free)}</div>
+            <div className="tile-label">Free on this disk</div>
+            <div className="tile-sub">of {bytes(st.disk_total)}</div>
+          </div>
+        )}
+      </div>
+      {low && <div className="note note-warn">The disk holding the catalog is nearly full. Scans stop working when it fills up;
+        free some space or move the catalog folder to a larger disk.</div>}
+      <p className="muted small">
+        Kept in <code>{st.dir}</code>{images ? ` · about ${bytes(perImage)} per picture so far` : ""}.
+        Back up <code>catalog.db</code> (the database) now and then; previews can be rebuilt by scanning again.
+      </p>
+    </section>
   );
 }
 

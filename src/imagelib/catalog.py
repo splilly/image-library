@@ -25,7 +25,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -326,6 +326,10 @@ _MIGRATIONS = {
         SELECT content_hash FROM files WHERE content_hash IS NOT NULL
         AND lower(substr(rel_path, length(rtrim(rel_path, replace(rel_path, '/', ''))) + 1)) GLOB '._*');
     UPDATE meta SET value = CAST(value AS INTEGER) + 1 WHERE key = 'files_version';
+    """,
+    11: """
+    -- Folder pairs (one folder's own files) gave way to whole trees, computed on demand (trees.py).
+    DROP TABLE IF EXISTS dup_folder_pairs;
     """,
 }
 

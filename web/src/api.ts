@@ -274,18 +274,49 @@ export interface DupGroup extends ContentBrief {
   copies: DupCopy[];
 }
 
-export interface FolderSide {
-  volume_id: string;
-  volume_label: string;
-  folder: string;
+/** One side of two compared folder trees. */
+export interface TreeSide {
   files: number;
+  bytes: number;
+  in_other: number; // files whose content is anywhere in the other tree
+  in_other_bytes: number;
+  only: number; // neither content nor path in the other tree: what a merge brings over
+  only_bytes: number;
+  unhashed: number; // not read yet: compared by path only
+  folders: number;
 }
 
-export interface FolderPair {
-  a: FolderSide;
-  b: FolderSide;
-  shared: number;
-  bytes: number;
+export interface TreeComparison {
+  a: TreeSide;
+  b: TreeSide;
+  same_path: number; // same relative path, same content
+  conflicts: number; // same relative path, different content: a merge keeps both
+  shared_folders: number; // relative folder paths present in both
+}
+
+export interface TreePair extends TreeComparison {
+  a_volume: string;
+  a_label: string;
+  a_root: string;
+  b_volume: string;
+  b_label: string;
+  b_root: string;
+  strength: number; // 0-1: how much of either tree the other already holds (content or layout)
+}
+
+export interface TreeChild extends TreeComparison {
+  a_name: string | null;
+  b_name: string | null;
+}
+
+export interface TreeListing {
+  building: boolean;
+  progress: string;
+  ready: boolean;
+  error: string | null;
+  built_at: number | null;
+  total: number;
+  items: TreePair[];
 }
 
 export interface DecisionSummary {
@@ -619,13 +650,11 @@ export const api = {
   exports: () => request<ExportInfo[]>("GET", "/api/organize"),
   runExport: (id: number) => request<ExportProgress>("POST", `/api/organize/${id}/run`),
   pauseExport: (id: number) => request<ExportProgress>("POST", `/api/organize/${id}/pause`),
-  folderPairs: (volume?: string, offset = 0) =>
-    request<{ items: FolderPair[]; total: number }>("GET", `/api/review/folder-pairs${qs({ volume, offset })}`),
-  discardFolderCopies: (keep: FolderSide, discard: FolderSide) =>
-    request<{ discarded: number; kept: number }>("POST", "/api/review/folder-pairs/discard", {
-      keep_volume: keep.volume_id, keep_folder: keep.folder,
-      discard_volume: discard.volume_id, discard_folder: discard.folder,
-    }),
+  treePairs: (sort: string, offset = 0, volume?: string) =>
+    request<TreeListing>("GET", `/api/review/trees${qs({ sort, offset, volume })}`),
+  treeChildren: (p: TreePair) =>
+    request<TreeChild[]>("GET", `/api/review/trees/children${qs({
+      a_volume: p.a_volume, a_root: p.a_root, b_volume: p.b_volume, b_root: p.b_root })}`),
 };
 
 export const previewUrl = (hash: string, size: "s" | "m" = "s") => `/api/preview/${hash}?size=${size}`;

@@ -317,6 +317,13 @@ kbd { font: 11px ui-monospace, Menlo, monospace; border: 1px solid var(--border)
 .pair-side { display: grid; gap: 2px; text-align: left; border: 1px solid var(--border); border-radius: 6px; padding: 8px; background: var(--bg); cursor: pointer; min-width: 0; }
 .pair-side:hover { border-color: var(--accent); }
 .pair-actions { grid-column: 2 / 4; display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+.num-ok { color: var(--ok); }
+.note-bad { background: var(--bad-soft); color: var(--bad); }
+.tree-facts { justify-content: space-between; align-items: center; }
+.tree-children { grid-column: 1 / -1; overflow-x: auto; }
+.tree-children .table th { text-align: left; font-weight: 600; padding: 6px; color: var(--muted); }
+.tree-children .table td { padding: 5px 6px; }
+.table .num, .table th.num { text-align: right; font-variant-numeric: tabular-nums; }
 .decisions td { vertical-align: middle; }
 @media (max-width: 900px) {
   .review-split { grid-template-columns: 1fr; grid-template-rows: 40% 60%; }

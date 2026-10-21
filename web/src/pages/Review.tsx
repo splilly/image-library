@@ -10,7 +10,7 @@ import { bytes, count, navigate, useLoad } from "../util";
 const TABS = [
   { id: "problems", label: "Problem files" },
   { id: "duplicates", label: "Duplicates" },
-  { id: "folders", label: "Duplicate folders" },
+  { id: "folders", label: "Duplicate trees" },
   { id: "thumbnails", label: "Thumbnails" },
   { id: "similar", label: "Similar images" },
   { id: "decisions", label: "Decisions" },
@@ -62,7 +62,7 @@ export default function Review({ params, scan }: { params: URLSearchParams; scan
         ) : tab === "similar" ? (
           <SimilarTab onChanged={summary.reload} />
         ) : tab === "folders" ? (
-          <FoldersTab onChanged={summary.reload} />
+          <FoldersTab />
         ) : tab === "decisions" ? (
           <DecisionsTab summary={s} onChanged={summary.reload} />
         ) : (

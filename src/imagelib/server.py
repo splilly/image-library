@@ -27,7 +27,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import analyze, discover, formats, organize, plans, queries, remote, review, sync, volumes
+from . import analyze, discover, formats, organize, plans, queries, remote, review, sync, trees, volumes
 from .catalog import Catalog
 from .jobs import Busy, ExportManager, OnlineVolumes, PlanManager, RelateManager, ScanManager, SyncManager
 from .previews import PreviewStore
@@ -149,13 +149,6 @@ class DecisionRequest(BaseModel):
     reason: str = "manual"
 
 
-class FolderDiscard(BaseModel):
-    keep_volume: str
-    keep_folder: str
-    discard_volume: str
-    discard_folder: str
-
-
 class PlanRun(BaseModel):
     verify_hash: bool = True
     require_connected_copy: bool = True
@@ -215,6 +208,7 @@ def create_app(catalog_dir: Path, workers: int | None = None, auto_relate: bool 
     tunnel = remote.CloudflaredProcess()
     phash_index = queries.PhashIndex()
     facet_index = queries.FacetIndex()
+    tree_index = trees.TreeIndex()
 
     @asynccontextmanager
     async def lifespan(app):
@@ -532,19 +526,14 @@ def create_app(catalog_dir: Path, workers: int | None = None, auto_relate: bool 
         except review.Refused as e:
             return refused(e)
 
-    @app.get("/api/review/folder-pairs")
-    def review_folder_pairs(volume: str | None = None, offset: int = 0, limit: int = Query(100, le=500)):
-        return review.folder_pairs(cat(), volume or None, offset, limit, busy=busy())
+    @app.get("/api/review/trees")
+    def review_trees(volume: str | None = None, sort: str = "shared", offset: int = 0,
+                     limit: int = Query(50, le=500)):
+        return tree_index.list(cat(), volume or None, sort, offset, limit)
 
-    @app.post("/api/review/folder-pairs/discard")
-    def review_folder_discard(req: FolderDiscard):
-        try:
-            return review.discard_folder_duplicates(cat(), req.keep_volume, req.keep_folder,
-                                                    req.discard_volume, req.discard_folder)
-        except review.Refused as e:
-            return refused(e)
-        except ValueError as e:
-            raise HTTPException(400, str(e))
+    @app.get("/api/review/trees/children")
+    def review_tree_children(a_volume: str, a_root: str, b_volume: str, b_root: str):
+        return trees.children(cat().conn, a_volume, a_root, b_volume, b_root)
 
     # -- relations: thumbnails & similar images ---------------------------------
 

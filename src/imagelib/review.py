@@ -50,7 +50,6 @@ _OTHER_VERSION_SURVIVES = f"""(
                JOIN contents o ON o.hash = o2.hash
                WHERE m.hash = x.hash AND o.hash != x.hash AND o.status = 'ok' AND {survives('o.hash')}))"""
 
-FOLDER_PAIR_MAX_COPIES = 50
 
 _lock = threading.Lock()
 
@@ -200,7 +199,7 @@ _last_rebuild: dict[str, float] = {}
 
 
 def refresh_duplicates(cat: Catalog, force: bool = False, busy: bool = False) -> bool:
-    """Rebuild dup_groups / dup_folder_pairs if files changed since the last build.
+    """Rebuild dup_groups if files changed since the last build (folder trees: trees.py).
 
     The grouping is computed into temporary tables, which does not lock the catalog;
     only the final swap is a (short) write. While a scan or plan is running (``busy``)
@@ -218,9 +217,7 @@ def refresh_duplicates(cat: Catalog, force: bool = False, busy: bool = False) ->
                 and time.monotonic() - _last_rebuild.get(key, -1e9) < REBUILD_INTERVAL):
             return False
         conn.execute("DROP TABLE IF EXISTS temp.new_dup_groups")
-        conn.execute("DROP TABLE IF EXISTS temp.new_dup_folder_pairs")
         conn.execute("CREATE TEMP TABLE new_dup_groups AS SELECT * FROM dup_groups WHERE 0")
-        conn.execute("CREATE TEMP TABLE new_dup_folder_pairs AS SELECT * FROM dup_folder_pairs WHERE 0")
         conn.execute("""
                 INSERT INTO temp.new_dup_groups(hash, copies, drives, max_per_drive, size)
                 SELECT content_hash, sum(n), count(*), max(n), max(size) FROM (
@@ -229,26 +226,10 @@ def refresh_duplicates(cat: Catalog, force: bool = False, busy: bool = False) ->
                     AND content_hash NOT IN (SELECT hash FROM contents WHERE status = 'sidecar')
                     GROUP BY content_hash, volume_id)
                 GROUP BY content_hash HAVING sum(n) > 1""")
-        conn.execute("CREATE INDEX temp.new_dup_groups_hash ON new_dup_groups(hash)")
-        # Folder of a path: strip the trailing name (rtrim of all non-'/' chars), then the '/'.
-        conn.execute("""
-                WITH d AS (
-                    SELECT f.content_hash AS h, f.volume_id AS v,
-                           rtrim(rtrim(f.rel_path, replace(f.rel_path, '/', '')), '/') AS dir, g.size AS size
-                    FROM files f JOIN temp.new_dup_groups g ON g.hash = f.content_hash
-                    -- Files copied hundreds of times (blank frames, stock art) say nothing about
-                    -- folders and would make this self-join quadratic.
-                    WHERE f.state != 'missing' AND g.copies <= ?)
-                INSERT INTO temp.new_dup_folder_pairs(a_volume, a_folder, b_volume, b_folder, shared, bytes)
-                SELECT a.v, a.dir, b.v, b.dir, count(DISTINCT a.h), sum(a.size) FROM d a JOIN d b
-                    ON a.h = b.h AND (a.v < b.v OR (a.v = b.v AND a.dir < b.dir))
-                GROUP BY a.v, a.dir, b.v, b.dir""", (FOLDER_PAIR_MAX_COPIES,))
         conn.execute("BEGIN IMMEDIATE")  # the swap: the only part that locks the catalog
         try:
             conn.execute("DELETE FROM dup_groups")
             conn.execute("INSERT INTO dup_groups SELECT * FROM temp.new_dup_groups")
-            conn.execute("DELETE FROM dup_folder_pairs")
-            conn.execute("INSERT INTO dup_folder_pairs SELECT * FROM temp.new_dup_folder_pairs")
             conn.execute("UPDATE meta SET value = ? WHERE key = 'dup_version'", (str(files_version),))
             conn.execute("COMMIT")
         except BaseException:
@@ -256,7 +237,6 @@ def refresh_duplicates(cat: Catalog, force: bool = False, busy: bool = False) ->
             raise
         finally:
             conn.execute("DROP TABLE IF EXISTS temp.new_dup_groups")
-            conn.execute("DROP TABLE IF EXISTS temp.new_dup_folder_pairs")
         _last_rebuild[key] = time.monotonic()
     return True
 
@@ -358,66 +338,6 @@ def apply_suggestions(cat: Catalog, hashes: list[bytes]) -> dict:
     decide(cat, keep_ids, KEEP, "duplicate")
     decide(cat, discard_ids, DISCARD, "duplicate")
     return {"groups": len(keep_ids), "discarded": len(discard_ids)}
-
-
-def folder_pairs(cat: Catalog, volume: str | None = None, offset: int = 0, limit: int = 100,
-                 busy: bool = False) -> dict:
-    refresh_duplicates(cat, busy=busy)
-    where, args = "1", []
-    if volume:
-        where, args = "(a_volume = ? OR b_volume = ?)", [volume, volume]
-    labels = {r["id"]: r["label"] for r in cat.conn.execute("SELECT id, label FROM volumes")}
-    rows = cat.conn.execute(
-        f"SELECT * FROM dup_folder_pairs WHERE {where} ORDER BY shared DESC, bytes DESC LIMIT ? OFFSET ?",
-        args + [limit, offset]).fetchall()
-    total = cat.conn.execute(f"SELECT count(*) FROM dup_folder_pairs WHERE {where}", args).fetchone()[0]
-    items = []
-    for r in rows:
-        a_files = _folder_count(cat, r["a_volume"], r["a_folder"])
-        b_files = _folder_count(cat, r["b_volume"], r["b_folder"])
-        items.append({
-            "a": {"volume_id": r["a_volume"], "volume_label": labels.get(r["a_volume"], "?"),
-                  "folder": r["a_folder"], "files": a_files},
-            "b": {"volume_id": r["b_volume"], "volume_label": labels.get(r["b_volume"], "?"),
-                  "folder": r["b_folder"], "files": b_files},
-            "shared": r["shared"], "bytes": r["bytes"]})
-    return {"items": items, "total": total}
-
-
-def _folder_count(cat: Catalog, volume: str, folder: str) -> int:
-    """Files directly in ``folder`` (not sub-folders)."""
-    sql, args = _in_folder("f", volume, folder)
-    return cat.conn.execute(f"SELECT count(*) FROM files f WHERE {sql}", args).fetchone()[0]
-
-
-def _in_folder(alias: str, volume: str, folder: str) -> tuple[str, list]:
-    """SQL matching files directly in ``folder``, using the (volume_id, rel_path) index."""
-    prefix = folder + "/" if folder else ""
-    sql = (f"{alias}.volume_id = ? AND {alias}.state != 'missing' "
-           f"AND instr(substr({alias}.rel_path, ?), '/') = 0")
-    args: list = [volume, len(prefix) + 1]
-    if prefix:
-        sql += f" AND {alias}.rel_path >= ? AND {alias}.rel_path < ?"
-        args += [prefix, prefix[:-1] + "0"]
-    return sql, args
-
-
-def discard_folder_duplicates(cat: Catalog, keep_volume: str, keep_folder: str,
-                              discard_volume: str, discard_folder: str) -> dict:
-    """Discard every file directly in the second folder that has an identical copy in the first."""
-    if (keep_volume, keep_folder) == (discard_volume, discard_folder):
-        raise ValueError("choose two different folders")
-    keep_sql, keep_args = _in_folder("a", keep_volume, keep_folder)
-    drop_sql, drop_args = _in_folder("b", discard_volume, discard_folder)
-    discard_ids = [r[0] for r in cat.conn.execute(
-        f"SELECT b.id FROM files b WHERE {drop_sql} AND b.content_hash IS NOT NULL AND EXISTS "
-        f"(SELECT 1 FROM files a WHERE a.content_hash = b.content_hash AND {keep_sql})", drop_args + keep_args)]
-    keep_ids = [r[0] for r in cat.conn.execute(
-        f"SELECT a.id FROM files a WHERE {keep_sql} AND EXISTS "
-        f"(SELECT 1 FROM files b WHERE b.content_hash = a.content_hash AND {drop_sql})", keep_args + drop_args)]
-    decide(cat, keep_ids, KEEP, "folder")
-    decide(cat, discard_ids, DISCARD, "folder")
-    return {"discarded": len(discard_ids), "kept": len(keep_ids)}
 
 
 # -- problem queue -----------------------------------------------------------------------

@@ -78,18 +78,6 @@ def test_suggestion_prefers_originals_over_backups_then_the_oldest():
     assert review.suggest_keeper(copies)[0] == 2
 
 
-def test_folder_pairs_and_folder_level_discard(lib):
-    cat, vid, root, rel, ids = lib
-    pairs = review.folder_pairs(cat)["items"]
-    top = pairs[0]
-    assert {top["a"]["folder"], top["b"]["folder"]} == {"backup/old pc/2004", "photos/2004"}
-    assert top["shared"] == 3
-    result = review.discard_folder_duplicates(cat, vid, "photos/2004", vid, "backup/old pc/2004")
-    assert result == {"discarded": 3, "kept": 3}
-    assert decision_of(cat, ids["dup1"]) == review.DISCARD
-    assert decision_of(cat, ids["photo4"]) is None   # not shared with the backup folder, untouched
-
-
 def test_duplicate_cache_rebuilds_only_when_files_change(lib):
     cat, vid, root, rel, ids = lib
     review.refresh_duplicates(cat)

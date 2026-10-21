@@ -247,8 +247,13 @@ def test_review_endpoints(scanned):
     assert applied == {"groups": 3, "discarded": 3}
     assert api.get("/api/review/duplicates", params={"undecided": True}).json()["total"] == 0
 
-    pairs = api.get("/api/review/folder-pairs").json()["items"]
-    assert pairs[0]["shared"] == 3
+    deadline = time.monotonic() + 30
+    while (trees := api.get("/api/review/trees").json())["building"] or not trees["ready"]:
+        assert time.monotonic() < deadline
+        time.sleep(0.1)
+    top = trees["items"][0]  # the sample's backup of 2004 holds three of its photos; it is all of "backup"
+    assert {top["a_root"], top["b_root"]} == {"backup", "photos"}
+    assert top["b"]["in_other"] == 3 or top["a"]["in_other"] == 3
     problems = api.get("/api/review/problems").json()["items"]
     zeroed = next(p for p in problems if p["path"] == rel["zeroed"])
     intact = api.get(f"/api/review/intact/{zeroed['hash']}").json()

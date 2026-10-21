@@ -55,7 +55,7 @@ def test_read_only_volume_is_registered_and_scanned_without_writing(drive, catal
     assert catalog.get_volume(ref.id)["last_seen_path"] == str(root.resolve())
     prog = scan(catalog, root.resolve(), ref.id)
 
-    assert prog.state == "done" and prog.files_done == 22
+    assert prog.state == "done" and prog.files_done == 23
     assert not (root / volumes.MARKER_NAME).exists()
     assert snapshot(root) == before
     assert file_row(catalog, ref.id, rel["zeroed"])["status"] == "corrupt"
@@ -98,7 +98,7 @@ def test_read_only_drive_is_found_at_a_new_mount_point_and_scan_resumes(drive, c
     mounts[replugged] = t5()
     assert volumes.locate_online(catalog) == {ref.id: replugged}
     prog = scan(catalog, replugged, ref.id)
-    assert prog.state == "done" and prog.files_done == 22
+    assert prog.state == "done" and prog.files_done == 23
 
 
 def test_a_different_drive_with_the_same_serial_is_not_mistaken_for_it(drive, catalog, mounts, tmp_path):

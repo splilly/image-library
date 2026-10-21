@@ -45,5 +45,5 @@ def test_workers_that_cannot_start_fail_the_scan_without_blaming_files(drive, ca
     vid = register(catalog, root)
     prog = scan(catalog, root, vid)
     assert prog.state == "failed" and "no files were marked corrupt" in prog.message
-    assert catalog.conn.execute("SELECT count(*) FROM contents").fetchone()[0] == 0
+    assert catalog.conn.execute("SELECT count(*) FROM contents WHERE status != 'other'").fetchone()[0] == 0
     assert file_row(catalog, vid, rel["photo1"])["state"] == "pending"

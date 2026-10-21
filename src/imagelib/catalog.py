@@ -675,11 +675,15 @@ class Catalog:
         c = self.conn
         files = c.execute(
             "SELECT count(*), coalesce(sum(size),0), sum(state='pending'), sum(state='read_error'), "
-            "sum(state='missing') FROM files"
+            "sum(state='missing') FROM files WHERE kind != 'other'"
         ).fetchone()
+        # Non-media files: catalogued only to compare and merge folder trees.
+        others = c.execute(
+            "SELECT count(*), coalesce(sum(size),0), sum(state='pending') FROM files WHERE kind = 'other' "
+            "AND state != 'missing'").fetchone()
         contents = c.execute(
             "SELECT count(*), sum(status='corrupt'), sum(status='warning'), sum(status='unsupported') FROM contents "
-            "WHERE status != 'sidecar'"
+            "WHERE status NOT IN ('sidecar', 'other')"
         ).fetchone()
         # macOS metadata files are not pictures: counted apart (few contents, found by the status index).
         sidecars = c.execute(
@@ -689,12 +693,14 @@ class Catalog:
         dup = c.execute(
             "SELECT count(*), coalesce(sum(n-1),0), coalesce(sum((n-1)*size),0) FROM "
             "(SELECT count(*) AS n, max(size) AS size FROM files WHERE content_hash IS NOT NULL "
-            "AND state='done' AND content_hash NOT IN (SELECT hash FROM contents WHERE status = 'sidecar') "
+            "AND state='done' AND kind != 'other' "
+            "AND content_hash NOT IN (SELECT hash FROM contents WHERE status = 'sidecar') "
             "GROUP BY content_hash HAVING n>1)"
         ).fetchone() if include_duplicates else (None, None, None)
         return {
             "files": files[0] - sidecars[0], "bytes": files[1] - sidecars[1], "pending": files[2] or 0,
             "sidecar_files": sidecars[0], "sidecar_bytes": sidecars[1],
+            "other_files": others[0], "other_bytes": others[1], "other_pending": others[2] or 0,
             "read_errors": files[3] or 0, "missing": files[4] or 0,
             "unique_contents": contents[0], "corrupt": contents[1] or 0,
             "warnings": contents[2] or 0, "unsupported": contents[3] or 0,

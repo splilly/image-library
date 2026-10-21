@@ -331,7 +331,8 @@ class Scanner:
         self._inflight: dict[bytes, _Inflight] = {}
         self._isolate: deque[tuple[bytes, _Inflight]] = deque()  # suspects after a pool crash
         self._held: list[_Read] = []  # reads needing analysis, parked while isolating
-        self._known: set[bytes] = set()
+        self._known: set[bytes] = set()   # contents analysed and up to date
+        self._hashed: set[bytes] = set()  # contents recorded for non-media files (formats.OTHER)
         self._outstanding = {t.scan_id: 0 for t in targets}
         self._reader_state: dict[int, _ReaderDone] = {}
 
@@ -440,7 +441,7 @@ class Scanner:
         path = discover.to_os_path(t.root, row["rel_path"], row["rel_path_raw"])
         prog.current = row["rel_path"]
         size_hint = row["size"]
-        inline = row["kind"] != formats.VIDEO and size_hint <= INLINE_LIMIT
+        inline = row["kind"] not in (formats.VIDEO, formats.OTHER) and size_hint <= INLINE_LIMIT
         reserve = size_hint if inline else 0
         waited = time.monotonic()
         if not self.budget.acquire(reserve, self.stop_event.is_set):
@@ -541,7 +542,18 @@ class Scanner:
         return self._mem_low
 
     def _handle(self, msg) -> None:
-        if isinstance(msg, _Read):
+        if isinstance(msg, _Read) and msg.kind == formats.OTHER:
+            # Not a picture: the hash is all that is kept (it compares folder trees). A picture with
+            # the same bytes still gets analysed, replacing this placeholder.
+            self._outstanding[msg.target.scan_id] += 1
+            self.budget.release(len(msg.data) if msg.data is not None else 0)
+            if msg.hash not in self._known and msg.hash not in self._hashed:
+                self._write("INSERT OR IGNORE INTO contents(hash, size, kind, status, analyzer_version, analyzed_at) "
+                            "VALUES(?, ?, ?, ?, ?, ?)", (msg.hash, msg.size, formats.OTHER, analyze.OTHER,
+                                                         analyze.ANALYZER_VERSION, time.time()))
+                self._hashed.add(msg.hash)
+            self._file_done(msg)
+        elif isinstance(msg, _Read):
             self._outstanding[msg.target.scan_id] += 1
             if msg.hash in self._known or self._content_known(msg.hash):
                 self.budget.release(len(msg.data) if msg.data is not None else 0)
@@ -571,8 +583,8 @@ class Scanner:
 
     def _content_known(self, h: bytes) -> bool:
         row = self.catalog.conn.execute(
-            f"SELECT {analyze.STALE_CONTENT} FROM contents WHERE hash=?", (h,)).fetchone()
-        if row and not row[0]:
+            f"SELECT {analyze.STALE_CONTENT}, status FROM contents WHERE hash=?", (h,)).fetchone()
+        if row and not row[0] and row[1] != analyze.OTHER:  # seen only as a non-media file: analyse it now
             self._known.add(h)
             return True
         return False

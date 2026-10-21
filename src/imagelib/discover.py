@@ -106,9 +106,7 @@ def walk(root: Path, subpath: str, on_error: Callable[[str, OSError], None],
                     continue
                 if not entry.is_file(follow_symlinks=False) or name == MARKER_NAME:
                     continue
-                kind = formats.kind_for(name)
-                if kind is None:
-                    continue
+                kind = formats.kind_for(name) or formats.OTHER
                 st = entry.stat(follow_symlinks=False)
             except OSError as e:
                 on_error(entry.path, e)

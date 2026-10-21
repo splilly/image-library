@@ -225,7 +225,7 @@ def refresh_duplicates(cat: Catalog, force: bool = False, busy: bool = False) ->
                 INSERT INTO temp.new_dup_groups(hash, copies, drives, max_per_drive, size)
                 SELECT content_hash, sum(n), count(*), max(n), max(size) FROM (
                     SELECT content_hash, volume_id, count(*) AS n, max(size) AS size FROM files
-                    WHERE content_hash IS NOT NULL AND state != 'missing'
+                    WHERE content_hash IS NOT NULL AND state != 'missing' AND kind != 'other'
                     AND content_hash NOT IN (SELECT hash FROM contents WHERE status = 'sidecar')
                     GROUP BY content_hash, volume_id)
                 GROUP BY content_hash HAVING sum(n) > 1""")
@@ -428,7 +428,7 @@ PROBLEM_STATUSES = ("corrupt", "warning", "unsupported")
 def problems(cat: Catalog, status: str | None = None, volume: str | None = None, undecided: bool = False,
              after: int = 0, limit: int = 200) -> dict:
     """Files needing a look: damaged or suspicious content, and files the disk could not read."""
-    where = ["f.id > ?", "f.state != 'missing'"]
+    where = ["f.id > ?", "f.state != 'missing'", "f.kind != 'other'"]
     args: list = [after]
     if status == "read_error":
         where.append("f.state = 'read_error'")

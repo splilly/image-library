@@ -32,7 +32,11 @@ export default function Dashboard({ scan }: { scan: ScanState | null }) {
 
       {s && (
         <div className="tiles">
-          <Tile label="Files catalogued" value={count(s.files)} sub={bytes(s.bytes)} />
+          <Tile label="Pictures & videos" value={count(s.files)} sub={bytes(s.bytes)} />
+          {s.other_files > 0 && (
+            <Tile label="Other files" value={count(s.other_files)}
+              sub={`${bytes(s.other_bytes)} · compared when matching folders`} />
+          )}
           <Tile label="Unique images & videos" value={count(s.unique_contents)} />
           <Tile label="Duplicate copies" value={count(s.redundant_copies)} sub={`${bytes(s.redundant_bytes)} reclaimable`}
             onClick={() => navigate("library", { status: "duplicates" })} />

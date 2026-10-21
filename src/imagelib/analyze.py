@@ -22,7 +22,8 @@ from . import formats, phash
 
 # Bump when analysis changes in a way that makes re-analysis worthwhile, and record in
 # STALE_CONTENT which existing results that change affects, so a bump re-reads only the
-# files that benefit instead of every file on every drive.
+# files that benefit instead of every file on every drive. Never include status 'other'
+# (non-media content, which is not analysed).
 #   2: strict JPEG checking (libjpeg-turbo warnings), RAW sensor data actually unpacked.
 #   3: perceptual hashes for damaged images, so intact originals can be found.
 #   4: JPEGs zero-padded after their end marker are no longer flagged as cut short.
@@ -44,6 +45,7 @@ WARNING = "warning"
 CORRUPT = "corrupt"
 UNSUPPORTED = "unsupported"
 SIDECAR = "sidecar"  # not a picture at all: a macOS metadata file named like one
+OTHER = "other"      # content only seen in non-media files (formats.OTHER): hashed, not analysed
 
 # AppleDouble / AppleSingle: what macOS writes as "._name" next to files on non-Mac drives.
 APPLE_DOUBLE_MAGIC = (b"\x00\x05\x16\x07", b"\x00\x05\x16\x00")

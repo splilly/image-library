@@ -58,8 +58,9 @@ def test_scan_through_the_api_and_summarise(scanned):
     api, vid, root, rel = scanned
     s = api.get("/api/summary").json()
     assert s["files"] == 22 and s["corrupt"] == 4 and s["redundant_copies"] == 3
+    assert s["other_files"] == 1  # notes.txt: catalogued (for comparing folders), not a picture
     vols = api.get("/api/volumes").json()
-    assert vols[0]["online"] and vols[0]["stats"]["done"] == 22
+    assert vols[0]["online"] and vols[0]["stats"]["done"] == 23  # everything on the drive
 
 
 def test_listing_pages_through_everything_in_order(scanned):

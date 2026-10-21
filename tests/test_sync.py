@@ -53,7 +53,8 @@ def hub_files(hub, **params):
 
 def test_agent_scans_appear_on_the_hub(hub, agent):
     sent = agent["sync"]()
-    assert sent["files"] == 22 and sent["contents"] == 19 and sent["previews"] > 0
+    # Every file travels (notes.txt too, for comparing folders); the summary counts pictures.
+    assert sent["files"] == 23 and sent["contents"] == 20 and sent["previews"] > 0
     assert hub.get("/api/summary").json()["files"] == 22
     vol = next(v for v in hub.get("/api/volumes").json() if v["id"] == agent["vid"])
     assert vol["label"] == "APFS drive" and not vol["online"] and vol["agent"]["machine"] == "mac-mini"
@@ -146,10 +147,10 @@ def test_the_last_copy_rule_holds_across_machines(hub, agent):
 def test_bundles_carry_the_same_data_without_a_connection(hub, agent, tmp_path):
     bundle = tmp_path / "agent.imagelib-bundle"
     counts = sync.export_bundle(agent["cat"], PreviewStore(agent["cat"].previews_path), bundle)
-    assert counts["files"] == 22
+    assert counts["files"] == 23
     r = hub.post("/api/remote/bundle/import",
                  files={"file": ("agent.imagelib-bundle", bundle.read_bytes(), "application/octet-stream")})
-    assert r.status_code == 200 and r.json()["files"] == 22 and r.json()["previews"] > 0
+    assert r.status_code == 200 and r.json()["files"] == 23 and r.json()["previews"] > 0
     assert hub.get("/api/summary").json()["files"] == 22
     # A second export only carries what changed since.
     assert sync.export_bundle(agent["cat"], PreviewStore(agent["cat"].previews_path), bundle)["files"] == 0

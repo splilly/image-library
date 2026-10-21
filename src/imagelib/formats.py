@@ -7,6 +7,10 @@ IMAGE = "image"
 RAW = "raw"
 PSD = "psd"
 VIDEO = "video"
+# Every other file: catalogued and hashed (to compare folder trees and merge them), never analysed,
+# and left out of everything about pictures.
+OTHER = "other"
+MEDIA_KINDS = (IMAGE, RAW, PSD, VIDEO)
 
 _EXTENSIONS: dict[str, str] = {}
 

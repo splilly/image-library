@@ -167,13 +167,13 @@ export default function Library({ params }: { params: URLSearchParams }) {
             <button className={`side-item ${query.volume === v.id && !query.folder ? "active" : ""}`}
               onClick={() => setParam({ volume: v.id, folder: undefined })}>
               <OnlineDot online={v.online} /> <span className="grow">{v.label}</span>
-              {filtering && facets.data ? (
+              {facets.data ? (  // pictures and videos (the drive also holds other files)
                 <span className={`muted small ${volumeCounts.get(v.id) ? "" : "dim"}`}
-                  title={`${count(volumeCounts.get(v.id) ?? 0)} of ${count(v.stats.files)} files match the filters`}>
+                  title={filtering ? `${count(volumeCounts.get(v.id) ?? 0)} files match the filters` : undefined}>
                   {count(volumeCounts.get(v.id) ?? 0)}
                 </span>
               ) : (
-                <span className="muted small">{count(v.stats.files)}</span>
+                <span className="muted small">…</span>
               )}
             </button>
             {query.volume === v.id && (

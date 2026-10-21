@@ -13,6 +13,7 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
+from . import formats
 from .catalog import Catalog, to_unsigned64
 
 PROBLEM_STATUSES = ("corrupt", "warning", "unsupported")
@@ -68,6 +69,7 @@ class FileFilter:
 
     def where(self) -> tuple[str, list]:
         clauses, args = self.path_clauses()
+        clauses.append(f"f.kind != '{formats.OTHER}'")  # the library is pictures and videos
         status = self.status
         if status in ("read_error", "pending", "missing"):
             clauses.append("f.state = ?")
@@ -202,7 +204,8 @@ def folders(cat: Catalog, volume_id: str, folder: str = "", flt: FileFilter | No
     prefix = folder.rstrip("/") + "/" if folder else ""
     start = len(prefix) + 1
     name = "substr(rel_path, ?, instr(substr(rel_path, ?), '/') - 1)"
-    where = "volume_id = ? AND state != 'missing'" + (" AND rel_path >= ? AND rel_path < ?" if prefix else "") \
+    where = f"volume_id = ? AND state != 'missing' AND kind != '{formats.OTHER}'" \
+        + (" AND rel_path >= ? AND rel_path < ?" if prefix else "") \
         + " AND instr(substr(rel_path, ?), '/') > 0"
     args = [start, start, volume_id] + ([prefix, prefix[:-1] + "0"] if prefix else []) + [start]
     others = replace(flt, volume_id=None, folder="", recursive=True) if flt else FileFilter()
@@ -287,6 +290,7 @@ class _FacetData:
         side = np.array([0 if v is None else v for v in cols[9]], dtype=np.int64)
         self.bucket = np.searchsorted(np.array(_SIZE_STEPS), side, side="right").astype(np.int8) - 1  # -1: unknown
         self.present = self.state.codes != self.state.code("missing")
+        self.media = self.kind.codes != self.kind.code(formats.OTHER)
         # Copies per content (present files only), and the first present file of each content.
         has = self.present & (content >= 0)
         self.duplicated = np.zeros(len(self.ids), dtype=bool)
@@ -305,7 +309,7 @@ class _FacetData:
 
     def mask(self, flt: FileFilter, paths: np.ndarray | None) -> np.ndarray:
         """Rows ``flt`` shows; must agree with FileFilter.where (the tests compare the two)."""
-        m = np.ones(len(self.ids), dtype=bool) if paths is None else paths.copy()
+        m = self.media.copy() if paths is None else paths & self.media
         if flt.volume_id:
             m &= self.volume.codes == self.volume.code(flt.volume_id)
         status = flt.status

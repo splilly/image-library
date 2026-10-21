@@ -288,7 +288,7 @@ def _thumb_candidates(conn) -> list[tuple[bytes, str]]:
         reasons[h] = [f"small ({edge} px)"]
     by_path: set[bytes] = set()
     for h, path in conn.execute("SELECT content_hash, rel_path FROM files WHERE state != 'missing' "
-                                "AND content_hash IS NOT NULL AND kind != 'video'"):
+                                "AND content_hash IS NOT NULL AND kind NOT IN ('video', 'other')"):
         if h not in by_path and _THUMB_PATH.search(path):
             by_path.add(h)
             reasons.setdefault(h, []).append("thumbnail-style folder or name")

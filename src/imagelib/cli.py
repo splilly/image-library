@@ -228,6 +228,9 @@ def cmd_status(args) -> int:
     print(f"  corrupt:        {s['corrupt']:,}")
     print(f"  warnings:       {s['warnings']:,}")
     print(f"  unsupported:    {s['unsupported']:,}")
+    if s["other_files"]:
+        print(f"Other files:      {s['other_files']:,} ({human_bytes(s['other_bytes'])}; not pictures, "
+              f"compared when matching folders)")
     if s["sidecar_files"]:
         print(f"macOS metadata files (not pictures, left out above): {s['sidecar_files']:,} "
               f"({human_bytes(s['sidecar_bytes'])})")
@@ -252,7 +255,8 @@ def cmd_problems(args) -> int:
         (*statuses, args.limit)).fetchall()
     rows += cat.conn.execute(
         "SELECT 'read_error', f.error, v.label, f.rel_path FROM files f JOIN volumes v ON v.id=f.volume_id "
-        "WHERE f.state='read_error' LIMIT ?", (args.limit,)).fetchall() if args.status == "all" else []
+        "WHERE f.state='read_error' AND f.kind != 'other' LIMIT ?", (args.limit,)).fetchall() \
+        if args.status == "all" else []
     for status, problems, label, rel in rows:
         print(f"{status:11} [{label}] {rel}\n{'':12}{problems}")
     if not rows:

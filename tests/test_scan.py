@@ -22,8 +22,8 @@ def test_full_scan_classifies_everything(drive, catalog):
     prog = scan(catalog, root, vid)
 
     assert prog.state == "done"
-    assert prog.files_total == 22  # trash folder and non-media ignored
-    assert prog.files_done == 22
+    assert prog.files_total == 23  # trash folder ignored; notes.txt is hashed, not analysed
+    assert prog.files_done == 23
 
     status = {name: file_row(catalog, vid, path)["status"] for name, path in rel.items()}
     assert status["truncated"] == "corrupt"
@@ -130,7 +130,7 @@ def test_drive_unplugged_during_analysis_pauses_and_resumes(drive, catalog, tmp_
     found = volumes.locate_online(catalog)
     assert found[vid] == unplugged
     prog = scan(catalog, unplugged, vid)
-    assert prog.state == "done" and prog.files_done == 22
+    assert prog.state == "done" and prog.files_done == 23
     assert catalog.conn.execute("SELECT count(*) FROM scans").fetchone()[0] == 1  # same scan resumed
 
 
@@ -154,7 +154,7 @@ def test_crash_mid_scan_resumes_without_losing_or_repeating_work(drive, tmp_path
     resumed = subprocess.run(cli + ["scan"], env=env, capture_output=True, text=True)  # no args = resume
     assert resumed.returncode == 0, resumed.stdout + resumed.stderr
     cat = Catalog(tmp_path / "cat")
-    assert cat.conn.execute("SELECT count(*) FROM files WHERE state='done'").fetchone()[0] == 22
+    assert cat.conn.execute("SELECT count(*) FROM files WHERE state='done'").fetchone()[0] == 23
     assert cat.conn.execute("SELECT count(*) FROM scans WHERE state='done'").fetchone()[0] == 1
     cat.close()
 
@@ -182,7 +182,7 @@ def test_decoder_hang_is_killed_and_reported(drive, catalog):
     assert time.monotonic() - started < 60
     row = file_row(catalog, vid, "photos/2004/IMG_hang.jpg")
     assert row["status"] == "corrupt" and "hung" in row["problems"]
-    assert catalog.conn.execute("SELECT count(*) FROM files WHERE state='done'").fetchone()[0] == 23
+    assert catalog.conn.execute("SELECT count(*) FROM files WHERE state='done'").fetchone()[0] == 24
 
 
 def test_where_finds_exact_copies_and_lookalikes(drive, catalog, tmp_path):
@@ -305,3 +305,28 @@ def test_text_that_is_not_valid_unicode_is_stored_not_fatal(catalog):
     write_transaction(conn, lambda: conn.execute("INSERT INTO settings(key, value) VALUES(?, ?)", ("c", "ok \U0001f600")))
     got = dict(conn.execute("SELECT key, value FROM settings WHERE key IN ('a', 'b', 'c')").fetchall())
     assert got == {"a": "IMG_�.jpg", "b": "Canon �", "c": "ok \U0001f600"}
+
+
+def test_every_file_is_hashed_and_only_media_is_analysed(tmp_path, catalog):
+    """Other files are catalogued for comparing folders; a picture sharing their bytes is still analysed."""
+    from PIL import Image
+
+    from imagelib import queries
+
+    root = tmp_path / "drive"
+    (root / "a").mkdir(parents=True)
+    (root / "b").mkdir()
+    Image.new("RGB", (640, 480), (200, 30, 30)).save(root / "b" / "photo.jpg")
+    shutil.copy(root / "b" / "photo.jpg", root / "a" / "photo.jpg.bak")  # read first: folder a sorts first
+    (root / "a" / "letter.docx").write_bytes(b"PK\x03\x04 not a picture" * 100)
+    vid = register(catalog, root)
+    prog = scan(catalog, root, vid)
+    assert prog.state == "done" and prog.files_done == 3 and prog.corrupt == 0
+    photo = file_row(catalog, vid, "b/photo.jpg")
+    backup = file_row(catalog, vid, "a/photo.jpg.bak")
+    letter = file_row(catalog, vid, "a/letter.docx")
+    assert photo["content_hash"] == backup["content_hash"] and photo["status"] == "ok" and photo["width"] == 640
+    assert backup["kind"] == "other" and letter["kind"] == "other" and letter["status"] == "other"
+    assert {i["path"] for i in queries.list_files(catalog, queries.FileFilter())["items"]} == {"b/photo.jpg"}
+    s = catalog.summary()
+    assert s["files"] == 1 and s["other_files"] == 2 and s["unique_contents"] == 1

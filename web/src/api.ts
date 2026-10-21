@@ -15,6 +15,9 @@ export interface Summary {
   redundant_bytes: number;
   sidecar_files: number; // macOS metadata files ("._name"): not pictures, left out of the other numbers
   sidecar_bytes: number;
+  other_files: number; // every other file: catalogued to compare and merge folders, not pictures
+  other_bytes: number;
+  other_pending: number;
   catalog_dir: string;
   unfinished_scans: { volume_id: string; label: string; subpath: string; state: string; message: string | null }[];
 }

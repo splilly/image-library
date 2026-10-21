@@ -17,9 +17,9 @@ def many_files(tmp_path):
     root = tmp_path / "drive"
     rng = random.Random(3)
     for i in range(500):
-        p = root / f"d{i // 100}" / f"IMG_{i:04d}.jpg"
+        p = root / f"d{i // 100}" / f"file_{i:04d}.bin"
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_bytes(rng.randbytes(20_000))  # not decodable: checking takes ~nothing
+        p.write_bytes(rng.randbytes(20_000))  # not media: only read and hashed, so the drive is all that counts
     return root
 
 

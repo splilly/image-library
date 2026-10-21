@@ -31,6 +31,7 @@ class _Dir:
     path: str            # '' = top of the drive
     parent: int | None
     name: str            # lower-cased, for matching
+    direct: int = 0      # files directly in it
     files: int = 0       # recursive
     dirs: int = 0        # recursive, not counting itself
 
@@ -47,6 +48,7 @@ class _Tree:
             cut = rel.rfind("/")
             d = self._dir(volume, rel[:cut] if cut >= 0 else "")
             self.dirs[d].files += 1
+            self.dirs[d].direct += 1
             if h is not None and size > 0:
                 self.by_hash[h].append(d)
         for i in range(len(self.dirs) - 1, -1, -1):  # children were created after their parents
@@ -128,29 +130,28 @@ def find_pairs(tree: _Tree) -> list[tuple[int, int]]:
 
     pairs = {p for p in set(content) | set(layout) if strong(p)}
 
-    # Roll up: a folder made mostly of matched sub-trees is the one to report, on both sides
-    # (Backup 2014 <-> Old Mac) or on one side only (several folders copied into one flat folder).
+    # Roll up the flattened case: several sub-folders of one folder all matched to the same flat
+    # folder (their files copied into it side by side) make that folder the pair. Climbing already
+    # joins trees whose names line up; rolling up anything else would misalign their relative paths,
+    # and several folders matching one tree with sub-folders are separate copies of it.
     def key(d: int) -> tuple[str, str]:
         return tree.dirs[d].volume, tree.dirs[d].path
 
     while True:
-        candidates: dict[tuple[int, int], list[tuple[int, int]]] = defaultdict(list)
+        candidates: dict[tuple[int, int], set[int]] = defaultdict(set)  # (folder, other) -> its matched children
         for a, b in pairs:
-            pa, pb = tree.dirs[a].parent, tree.dirs[b].parent
-            for x, y in ((pa, pb), (pa, b), (a, pb)):
-                if x is None or y is None or tree.related(x, y):
-                    continue
-                cand, child = ((x, y), (a, b)) if key(x) < key(y) else ((y, x), (b, a))
-                if cand not in pairs:
-                    candidates[cand].append(child)
+            for child, other in ((a, b), (b, a)):
+                parent = tree.dirs[child].parent
+                if parent is not None and not tree.related(parent, other):
+                    candidates[(parent, other)].add(child)
         added = False
-        for (x, y), kids in candidates.items():
-            def covered(top: int, sides: set[int]) -> int:
-                return tree.dirs[top].files if top in sides else sum(tree.dirs[d].files for d in sides)
-
-            if covered(x, {k[0] for k in kids}) >= ROLL_UP_COVERAGE * tree.dirs[x].files and \
-                    covered(y, {k[1] for k in kids}) >= ROLL_UP_COVERAGE * tree.dirs[y].files:
-                pairs.add((x, y))
+        for (parent, other), kids in candidates.items():
+            pair = (parent, other) if key(parent) < key(other) else (other, parent)
+            flat = tree.dirs[other].direct >= ROLL_UP_COVERAGE * tree.dirs[other].files
+            if pair in pairs or len(kids) < 2 or not flat:
+                continue
+            if sum(tree.dirs[k].files for k in kids) >= ROLL_UP_COVERAGE * tree.dirs[parent].files:
+                pairs.add(pair)
                 added = True
         if not added:
             break

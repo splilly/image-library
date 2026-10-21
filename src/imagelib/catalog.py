@@ -25,7 +25,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -359,6 +359,10 @@ _MIGRATIONS = {
         status       TEXT NOT NULL                  -- pending | moving | moved
     );
     CREATE INDEX IF NOT EXISTS merge_items_merge ON merge_items(merge_id, status);
+    """,
+    13: """
+    -- Merges across drives copy files: the record of the copy, removed again by Undo.
+    ALTER TABLE merge_items ADD COLUMN dest_file_id INTEGER REFERENCES files(id);
     """,
 }
 

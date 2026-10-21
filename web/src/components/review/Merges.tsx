@@ -51,12 +51,14 @@ export function MergeDialog({ prepared, fresh = false, onClose }: {
       <ActionError error={error} />
       <p>
         Keep <strong>{info.volume_label}</strong> <code>{where(info.keep_root)}</code> and bring into it what only{" "}
-        <code>{info.drop_root}</code> has:
+        {!info.same_drive && <strong>{info.drop_label} </strong>}<code>{info.drop_root}</code> has:
       </p>
       <ul className="merge-plan">
         <li>
           <strong>{plural(c.move.files, "file")}</strong> ({bytes(c.move.bytes)}) that only{" "}
-          <code>{info.drop_root}</code> has {c.move.files === 1 ? "moves" : "move"} to the same place in the kept tree.
+          <code>{info.drop_root}</code> has {info.same_drive ? (c.move.files === 1 ? "moves" : "move")
+            : (c.move.files === 1 ? "is copied (and checked)" : "are copied (and checked)")} to the same place in
+          the kept tree.
           <Examples items={info.examples.move} />
         </li>
         {c.conflict.files > 0 && (
@@ -73,10 +75,13 @@ export function MergeDialog({ prepared, fresh = false, onClose }: {
       </ul>
       <p>
         Then the rest of <code>{info.drop_root}</code> is moved to <code>_imagelib_quarantine/merge-{info.id}</code>{" "}
-        on the same drive. Nothing is deleted: <strong>Undo</strong> puts every file back where it was.
+        on {info.same_drive ? "the same drive" : <strong>{info.drop_label}</strong>}. Nothing is deleted:{" "}
+        <strong>Undo</strong> puts every file back where it was{info.same_drive ? "" : " and removes the copies"}.
+        {!info.same_drive && " Both drives must be connected to this computer."}
       </p>
       <p className="muted small">
-        The drive is checked first: if the folders changed since they were scanned, nothing is moved.
+        {info.same_drive ? "The drive is" : "Both drives are"} checked first: if the folders changed since they were
+        scanned, nothing is moved.
       </p>
       {started && (
         <div className="merge-progress">

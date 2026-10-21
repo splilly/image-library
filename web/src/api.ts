@@ -331,7 +331,9 @@ export interface MergeInfo {
   error: string | null;
   created_at: number;
   finished_at: number | null;
-  volume_label: string;
+  volume_label: string; // the kept tree's drive
+  drop_label: string;
+  same_drive: boolean;
   keep_volume: string;
   keep_root: string;
   drop_volume: string;

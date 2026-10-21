@@ -85,9 +85,7 @@ function PairCard({ pair, readOnly, onMerge }: {
   const [open, setOpen] = useState(false);
   const left = { volume: pair.a_volume, root: pair.a_root };
   const right = { volume: pair.b_volume, root: pair.b_root };
-  const why = readOnly ? "The drive is registered read-only: nothing on it can be moved."
-    : pair.a_volume !== pair.b_volume ? "Merging trees on different drives is not available yet."
-      : undefined;
+  const why = readOnly ? "A drive is registered read-only: nothing on it can be moved or copied." : undefined;
   return (
     <div className="pair tree-pair">
       <div className="pair-stat">

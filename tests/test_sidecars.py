@@ -58,20 +58,28 @@ def test_sidecars_are_left_out_unless_asked_for(tmp_path, catalog):
 
 def test_catalogs_from_older_versions_are_cleaned_up_once(tmp_path):
     """Earlier versions reported sidecars as corrupt; opening the catalog fixes that without the drive."""
-    cat = Catalog(tmp_path / "catalog")
-    vid = register(cat, tmp_path)  # any folder: the drive is not read
+    from imagelib.catalog import _MIGRATIONS, _SCHEMA
+
+    folder = tmp_path / "catalog"
+    folder.mkdir()
+    old = sqlite3.connect(folder / "catalog.db")  # a catalog as version 9 left it
+    old.executescript(_SCHEMA)
+    for version in range(2, 10):
+        old.executescript(_MIGRATIONS[version])
+    old.execute("PRAGMA user_version = 9")
+    old.execute("INSERT INTO volumes(id, label, created_at) VALUES('v', 'Drive', 0)")
     rows = [("photos/._IMG_0001.jpg", b"a", "corrupt"), ("photos/._IMG_0002.mov", b"b", "corrupt"),
             ("photos/IMG_0003.jpg", b"c", "corrupt"), ("photos/._fine.png", b"d", "ok")]
-    for i, (path, h, status) in enumerate(rows):
-        cat.conn.execute("INSERT INTO contents(hash, size, kind, status, analyzer_version, analyzed_at) "
-                         "VALUES(?, 10, 'image', ?, 5, 0)", (h * 32, status))
-        cat.conn.execute("INSERT INTO files(volume_id, rel_path, path_key, kind, size, mtime_ns, state, "
-                         "content_hash, first_seen_at, last_seen_scan) VALUES(?,?,?,'image',10,0,'done',?,0,0)",
-                         (vid, path, path.lower(), h * 32))
-    cat.conn.execute("PRAGMA user_version = 9")
-    cat.close()
+    for path, h, status in rows:
+        old.execute("INSERT INTO contents(hash, size, kind, status, analyzer_version, analyzed_at) "
+                    "VALUES(?, 10, 'image', ?, 5, 0)", (h * 32, status))
+        old.execute("INSERT INTO files(volume_id, rel_path, path_key, kind, size, mtime_ns, state, "
+                    "content_hash, first_seen_at, last_seen_scan) VALUES('v',?,?,'image',10,0,'done',?,0,0)",
+                    (path, path.lower(), h * 32))
+    old.commit()
+    old.close()
 
-    reopened = Catalog(tmp_path / "catalog")
+    reopened = Catalog(folder)
     status = dict(reopened.conn.execute("SELECT substr(hash, 1, 1), status FROM contents").fetchall())
     assert status == {b"a": "sidecar", b"b": "sidecar", b"c": "corrupt", b"d": "ok"}
     assert sqlite3.connect(reopened.db_path).execute("PRAGMA user_version").fetchone()[0] >= 10

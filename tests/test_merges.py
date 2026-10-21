@@ -85,6 +85,7 @@ def test_merge_keeps_everything_once_and_undo_puts_it_back(merged_drive, catalog
 
     assert merges.undo(catalog, m["id"], {vid: root}) == {"problems": []}
     assert listing(root) == before
+    assert not (root / "Keep/Deep").exists()  # folders the merge created are gone again
     assert merges.detail(catalog, m["id"])["status"] == "restored"
     assert scan(catalog, root, vid).files_total == 0  # catalog matches the disk again
 
@@ -116,11 +117,10 @@ def test_merges_that_cannot_be_done_safely_are_refused(merged_drive, catalog, tm
     for keep, drop in (("Keep", "Keep/Pictures"), ("", "Old"), ("Keep", "")):
         with pytest.raises(merges.MergeRefused):
             merges.prepare(catalog, vid, keep, vid, drop)
-    other = tmp_path / "other"
-    put(other, "x/y.bin", b"1")
-    vid2 = register(catalog, other)
-    with pytest.raises(merges.MergeRefused, match="different drives"):
-        merges.prepare(catalog, vid, "Keep", vid2, "x")
+    catalog.conn.execute("UPDATE volumes SET read_only = 1 WHERE id = ?", (vid,))
+    with pytest.raises(merges.MergeRefused, match="read-only"):
+        merges.prepare(catalog, vid, "Keep", vid, "Old")
+    catalog.conn.execute("UPDATE volumes SET read_only = 0 WHERE id = ?", (vid,))
     catalog.conn.execute("UPDATE files SET state = 'pending', content_hash = NULL WHERE rel_path = 'Old/notes.txt'")
     with pytest.raises(merges.MergeRefused, match="not scanned"):
         merges.prepare(catalog, vid, "Keep", vid, "Old")
@@ -169,3 +169,45 @@ def test_merging_through_the_api(tmp_path):
         assert d["status"] == "merged" and (root / "Keep/b.bin").exists() and not (root / "Old").exists()
         assert api.post(f"/api/merges/{m['id']}/undo").json()["merge"]["status"] == "restored"
         assert (root / "Old/b.bin").exists() and not (root / "Keep/b.bin").exists()
+
+
+def test_merging_across_drives_copies_checks_and_undoes(merged_drive, catalog, tmp_path):
+    root, vid = merged_drive
+    other = tmp_path / "other drive"
+    put(other, "Backup/Pictures/c.jpg.bak", (root / "Old/Pictures/c.jpg.bak").read_bytes())
+    put(other, "Backup/Pictures/z.jpg.bak", b"only on the other drive" * 50)
+    put(other, "Backup/notes.txt", b"yet another version")
+    vid2 = register(catalog, other, "Other")
+    assert scan(catalog, other, vid2).state == "done"
+    online = {vid: root, vid2: other}
+    before = (listing(root), listing(other))
+
+    m = merges.prepare(catalog, vid, "Keep", vid2, "Backup")
+    assert not m["same_drive"]
+    assert (m["counts"]["move"]["files"], m["counts"]["conflict"]["files"], m["counts"]["covered"]["files"]) == (1, 1, 1)
+    prog = merges.run(catalog, m["id"], online, lambda: False, lambda p: None)
+    assert prog.state == "merged", prog.problems
+    kept = listing(root)
+    assert kept["Keep/Pictures/z.jpg.bak"] == b"only on the other drive" * 50
+    assert kept[f"Keep/notes (imagelib merge {m['id']}).txt"] == b"yet another version"
+    assert os.stat(root / "Keep/Pictures/z.jpg.bak").st_mtime_ns == \
+        os.stat(other / QUARANTINE_DIR / f"merge-{m['id']}" / "Backup/Pictures/z.jpg.bak").st_mtime_ns
+    assert not (other / "Backup").exists() and not any(".tmp" in p for p in kept)
+    assert scan(catalog, root, vid).files_total == 0  # the copies are already catalogued, unchanged
+
+    assert merges.undo(catalog, m["id"], online) == {"problems": []}
+    assert (listing(root), listing(other)) == before
+    assert scan(catalog, root, vid).files_total == 0 and scan(catalog, other, vid2).files_total == 0
+
+
+def test_cross_drive_merge_stops_without_room(merged_drive, catalog, tmp_path, monkeypatch):
+    root, vid = merged_drive
+    other = tmp_path / "other drive"
+    put(other, "Backup/big.bin", b"x" * 1000)
+    vid2 = register(catalog, other, "Other")
+    scan(catalog, other, vid2)
+    m = merges.prepare(catalog, vid, "Keep", vid2, "Backup")
+    monkeypatch.setattr(merges, "FREE_SPACE_MARGIN", 1 << 62)
+    prog = merges.run(catalog, m["id"], {vid: root, vid2: other}, lambda: False, lambda p: None)
+    assert prog.state == "blocked" and "free space" in prog.message
+    assert (other / "Backup/big.bin").exists() and not (root / "Keep/big.bin").exists()

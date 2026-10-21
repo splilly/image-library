@@ -251,8 +251,8 @@ def test_review_endpoints(scanned):
     while (trees := api.get("/api/review/trees").json())["building"] or not trees["ready"]:
         assert time.monotonic() < deadline
         time.sleep(0.1)
-    top = trees["items"][0]  # the sample's backup of 2004 holds three of its photos; it is all of "backup"
-    assert {top["a_root"], top["b_root"]} == {"backup", "photos"}
+    top = trees["items"][0]  # "backup/old pc/2004" holds three photos of "photos/2004": aligned one level up
+    assert {top["a_root"], top["b_root"]} == {"backup/old pc", "photos"}
     assert top["b"]["in_other"] == 3 or top["a"]["in_other"] == 3
     problems = api.get("/api/review/problems").json()["items"]
     zeroed = next(p for p in problems if p["path"] == rel["zeroed"])

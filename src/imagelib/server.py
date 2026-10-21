@@ -27,9 +27,10 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import analyze, discover, formats, organize, plans, queries, remote, review, sync, trees, volumes
+from . import analyze, discover, formats, merges, organize, plans, queries, remote, review, sync, trees, volumes
 from .catalog import Catalog
-from .jobs import Busy, ExportManager, OnlineVolumes, PlanManager, RelateManager, ScanManager, SyncManager
+from .jobs import (Busy, ExportManager, MergeManager, OnlineVolumes, PlanManager, RelateManager, ScanManager,
+                   SyncManager)
 from .previews import PreviewStore
 from .search import hash_file
 
@@ -143,6 +144,13 @@ class EditVolume(BaseModel):
     notes: str | None = None
 
 
+class MergeRequest(BaseModel):
+    keep_volume: str
+    keep_root: str
+    drop_volume: str
+    drop_root: str
+
+
 class DecisionRequest(BaseModel):
     file_ids: list[int]
     decision: str | None          # keep | discard | None to clear
@@ -202,6 +210,9 @@ def create_app(catalog_dir: Path, workers: int | None = None, auto_relate: bool 
     plan_runner.scans, scans.plans = scans, plan_runner
     exporter = ExportManager(catalog_dir, online)
     exporter.scans, exporter.plans, scans.exports = scans, plan_runner, exporter
+    merger = MergeManager(catalog_dir, online)
+    merger.others = [scans, plan_runner, exporter]
+    scans.merges = plan_runner.merges = exporter.merges = merger
     syncer = SyncManager(catalog_dir)
     syncer.scans, syncer.plans, scans.sync = scans, plan_runner, syncer
     access = AccessState(catalog_dir)
@@ -227,6 +238,7 @@ def create_app(catalog_dir: Path, workers: int | None = None, auto_relate: bool 
         relater.stop(wait=False)
         plan_runner.stop()
         exporter.stop()
+        merger.stop()
         await asyncio.to_thread(scans.shutdown)
 
     app = FastAPI(title="imagelib", lifespan=lifespan)
@@ -247,8 +259,8 @@ def create_app(catalog_dir: Path, workers: int | None = None, auto_relate: bool 
     DUP_KEYS = ("duplicate_groups", "redundant_copies", "redundant_bytes")
 
     def busy() -> bool:
-        """A scan or plan is changing files right now."""
-        return scans.running or plan_runner.running
+        """A scan, plan or merge is changing files right now."""
+        return scans.running or plan_runner.running or merger.running
 
     @app.get("/api/storage")
     def storage():
@@ -775,6 +787,75 @@ def create_app(catalog_dir: Path, workers: int | None = None, auto_relate: bool 
     def organize_pause(export_id: int):
         exporter.stop()
         return exporter.state()
+
+    # -- merging folder trees ----------------------------------------------------
+
+    def merge_refused(e: merges.MergeRefused):
+        return JSONResponse({"detail": str(e)}, status_code=409)
+
+    @app.post("/api/merges")
+    def prepare_merge(req: MergeRequest):
+        try:
+            return merges.prepare(cat(), req.keep_volume, req.keep_root, req.drop_volume, req.drop_root)
+        except merges.MergeRefused as e:
+            return merge_refused(e)
+
+    @app.get("/api/merges")
+    def list_merges():
+        return merges.list_merges(cat())
+
+    def merge_or_404(merge_id: int) -> dict:
+        try:
+            d = merges.detail(cat(), merge_id)
+        except KeyError:
+            raise HTTPException(404, "no such merge")
+        p = merger.state()
+        d["progress"] = p if p and p["merge_id"] == merge_id else None
+        return d
+
+    @app.get("/api/merges/{merge_id}")
+    def merge_detail(merge_id: int):
+        return merge_or_404(merge_id)
+
+    @app.post("/api/merges/{merge_id}/run")
+    def run_merge(merge_id: int):
+        merge_or_404(merge_id)
+        try:
+            merger.start(merge_id)
+        except Busy as e:
+            raise HTTPException(409, str(e))
+        return merge_or_404(merge_id)
+
+    @app.post("/api/merges/{merge_id}/pause")
+    def pause_merge(merge_id: int):
+        merger.stop()
+        return merge_or_404(merge_id)
+
+    def merge_action(merge_id: int, action) -> dict:
+        merge_or_404(merge_id)
+        if merger.running:
+            raise HTTPException(409, "a merge is running; wait for it to finish")
+        try:
+            return {**action(cat(), merge_id, online.get(force=True)), "merge": merge_or_404(merge_id)}
+        except merges.MergeRefused as e:
+            return merge_refused(e)
+
+    @app.post("/api/merges/{merge_id}/undo")
+    def undo_merge(merge_id: int):
+        return merge_action(merge_id, merges.undo)
+
+    @app.post("/api/merges/{merge_id}/purge")
+    def purge_merge(merge_id: int):
+        return merge_action(merge_id, merges.purge)
+
+    @app.delete("/api/merges/{merge_id}")
+    def cancel_merge(merge_id: int):
+        merge_or_404(merge_id)
+        try:
+            merges.cancel(cat(), merge_id)
+        except merges.MergeRefused as e:
+            return merge_refused(e)
+        return {"cancelled": merge_id}
 
     # -- action plans ------------------------------------------------------------
 

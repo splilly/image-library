@@ -318,9 +318,14 @@ kbd { font: 11px ui-monospace, Menlo, monospace; border: 1px solid var(--border)
 .pair-side:hover { border-color: var(--accent); }
 .pair-actions { grid-column: 2 / 4; display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
 .num-ok { color: var(--ok); }
-.note-bad { background: var(--bad-soft); color: var(--bad); }
 .tree-facts { justify-content: space-between; align-items: center; }
 .tree-children { grid-column: 1 / -1; overflow-x: auto; }
+.merge-plan { padding-left: 18px; display: grid; gap: 6px; }
+.merge-examples { margin: 4px 0 0; padding-left: 16px; overflow-wrap: anywhere; }
+.merge-progress { border-top: 1px solid var(--border); padding-top: 8px; }
+.merges { margin-top: 12px; }
+.merges h3 { margin: 0 0 6px; }
+.row-actions { display: flex; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }
 .tree-children .table th { text-align: left; font-weight: 600; padding: 6px; color: var(--muted); }
 .tree-children .table td { padding: 5px 6px; }
 .table .num, .table th.num { text-align: right; font-variant-numeric: tabular-nums; }

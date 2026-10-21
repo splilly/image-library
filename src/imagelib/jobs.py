@@ -13,7 +13,7 @@ import time
 from dataclasses import fields
 from pathlib import Path
 
-from . import organize, plans, relate, sync, volumes
+from . import merges, organize, plans, relate, sync, volumes
 from .catalog import Catalog
 from .previews import PreviewStore
 from .scanner import Scanner, TargetProgress
@@ -111,6 +111,7 @@ class PlanManager:
         self.online = online
         self.relate = relate_manager
         self.scans: ScanManager | None = None
+        self.merges: MergeManager | None = None
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -126,6 +127,8 @@ class PlanManager:
                 raise Busy("an action plan is already running")
             if self.scans and self.scans.running:
                 raise Busy("a scan is running; pause it or wait for it to finish")
+            if self.merges and self.merges.running:
+                raise Busy("a folder merge is running; wait for it to finish")
             self._stop.clear()
             self.progress = plans.RunProgress(plan_id, state="starting")
             self._thread = threading.Thread(target=self._run, args=(plan_id, options), name="plan", daemon=True)
@@ -165,6 +168,7 @@ class ExportManager:
         self.online = online
         self.scans: ScanManager | None = None
         self.plans: PlanManager | None = None
+        self.merges: MergeManager | None = None
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -178,8 +182,8 @@ class ExportManager:
         with self._lock:
             if self._thread is not None:
                 raise Busy("an export is already running")
-            if (self.scans and self.scans.running) or (self.plans and self.plans.running):
-                raise Busy("wait for the running scan or action plan to finish")
+            if any(m and m.running for m in (self.scans, self.plans, self.merges)):
+                raise Busy("wait for the running scan, action plan or folder merge to finish")
             self._stop.clear()
             self.progress = organize.Progress(export_id, state="starting")
             self._thread = threading.Thread(target=self._run, args=(export_id,), name="export", daemon=True)
@@ -197,6 +201,54 @@ class ExportManager:
                          self._stop.is_set, on_progress)
         except Exception as e:
             self.progress = organize.Progress(export_id, state="failed", message=f"{type(e).__name__}: {e}")
+        finally:
+            with self._lock:
+                self._thread = None
+
+    def state(self) -> dict | None:
+        p = self.progress
+        return None if p is None else {**vars(p), "running": self.running}
+
+
+class MergeManager:
+    """Runs one folder-tree merge at a time in the background (never alongside a scan, plan or export)."""
+
+    def __init__(self, catalog_dir: Path, online: OnlineVolumes):
+        self.catalog_dir = catalog_dir
+        self.online = online
+        self.others: list = []  # managers whose work must not overlap (scans, plans, exports)
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
+        self.progress: merges.Progress | None = None
+
+    @property
+    def running(self) -> bool:
+        return self._thread is not None
+
+    def start(self, merge_id: int) -> None:
+        with self._lock:
+            if self._thread is not None:
+                raise Busy("a merge is already running")
+            if any(m.running for m in self.others):
+                raise Busy("wait for the running scan, action plan or export to finish")
+            self._stop.clear()
+            self.progress = merges.Progress(merge_id)
+            self._thread = threading.Thread(target=self._run, args=(merge_id,), name="merge", daemon=True)
+            self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def _run(self, merge_id: int) -> None:
+        try:
+            def on_progress(p: merges.Progress) -> None:
+                self.progress = merges.Progress(**{**vars(p), "problems": list(p.problems)})
+
+            merges.run(Catalog.shared(self.catalog_dir), merge_id, self.online.get(force=True),
+                       self._stop.is_set, on_progress)
+        except Exception as e:
+            self.progress = merges.Progress(merge_id, state="failed", message=f"{type(e).__name__}: {e}")
         finally:
             with self._lock:
                 self._thread = None
@@ -273,6 +325,7 @@ class ScanManager:
         self.plans: PlanManager | None = None
         self.sync: SyncManager | None = None  # an agent sends its results after every scan session
         self.exports: ExportManager | None = None
+        self.merges: MergeManager | None = None
         self.online = online
         self.workers = workers
         self._lock = threading.Lock()
@@ -291,6 +344,8 @@ class ScanManager:
             raise Busy("an action plan is running; wait for it to finish or pause it")
         if self.exports and self.exports.running:
             raise Busy("an export is running; wait for it to finish or pause it")
+        if self.merges and self.merges.running:
+            raise Busy("a folder merge is running; wait for it to finish or pause it")
         with self._lock:
             for req in requests:
                 self._wanted[req] = None
@@ -335,6 +390,8 @@ class ScanManager:
             state["plan"] = self.plans.state()
         if self.exports:
             state["export"] = self.exports.state()
+        if self.merges:
+            state["merge"] = self.merges.state()
         return state
 
     # -- runner ------------------------------------------------------------

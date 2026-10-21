@@ -309,6 +309,39 @@ export interface TreeChild extends TreeComparison {
   b_name: string | null;
 }
 
+export interface MergeCounts {
+  move: { files: number; bytes: number }; // only in the merged-away tree: brought over
+  conflict: { files: number; bytes: number }; // same path, other content: brought over beside the kept file
+  covered: { files: number; bytes: number }; // content already in the kept tree
+}
+
+export interface MergeProgress {
+  merge_id: number;
+  state: string;
+  done: number;
+  total: number;
+  message: string;
+  problems: string[];
+  running: boolean;
+}
+
+export interface MergeInfo {
+  id: number;
+  status: "planned" | "running" | "blocked" | "failed" | "merged" | "restored" | "purged";
+  error: string | null;
+  created_at: number;
+  finished_at: number | null;
+  volume_label: string;
+  keep_volume: string;
+  keep_root: string;
+  drop_volume: string;
+  drop_root: string;
+  quarantine_path: string | null;
+  counts: MergeCounts;
+  examples: { move: { from: string; to: string }[]; conflict: { from: string; to: string }[] };
+  progress?: MergeProgress | null;
+}
+
 export interface TreeListing {
   building: boolean;
   progress: string;
@@ -652,6 +685,16 @@ export const api = {
   pauseExport: (id: number) => request<ExportProgress>("POST", `/api/organize/${id}/pause`),
   treePairs: (sort: string, offset = 0, volume?: string) =>
     request<TreeListing>("GET", `/api/review/trees${qs({ sort, offset, volume })}`),
+  prepareMerge: (keep: { volume: string; root: string }, drop: { volume: string; root: string }) =>
+    request<MergeInfo>("POST", "/api/merges", {
+      keep_volume: keep.volume, keep_root: keep.root, drop_volume: drop.volume, drop_root: drop.root }),
+  merges: () => request<MergeInfo[]>("GET", "/api/merges"),
+  merge: (id: number) => request<MergeInfo>("GET", `/api/merges/${id}`),
+  runMerge: (id: number) => request<MergeInfo>("POST", `/api/merges/${id}/run`),
+  pauseMerge: (id: number) => request<MergeInfo>("POST", `/api/merges/${id}/pause`),
+  undoMerge: (id: number) => request<{ problems: string[]; merge: MergeInfo }>("POST", `/api/merges/${id}/undo`),
+  purgeMerge: (id: number) => request<{ bytes: number; merge: MergeInfo }>("POST", `/api/merges/${id}/purge`),
+  cancelMerge: (id: number) => request<{ cancelled: number }>("DELETE", `/api/merges/${id}`),
   treeChildren: (p: TreePair) =>
     request<TreeChild[]>("GET", `/api/review/trees/children${qs({
       a_volume: p.a_volume, a_root: p.a_root, b_volume: p.b_volume, b_root: p.b_root })}`),

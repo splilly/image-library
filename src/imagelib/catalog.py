@@ -25,7 +25,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -330,6 +330,35 @@ _MIGRATIONS = {
     11: """
     -- Folder pairs (one folder's own files) gave way to whole trees, computed on demand (trees.py).
     DROP TABLE IF EXISTS dup_folder_pairs;
+    """,
+    12: """
+    -- Merging folder trees (merges.py): one tree kept, what only the other has brought over,
+    -- the rest of the other tree quarantined.
+    CREATE TABLE IF NOT EXISTS merges (
+        id              INTEGER PRIMARY KEY,
+        keep_volume     TEXT NOT NULL,
+        keep_root       TEXT NOT NULL,              -- '' = top of the drive
+        drop_volume     TEXT NOT NULL,
+        drop_root       TEXT NOT NULL,
+        status          TEXT NOT NULL,              -- planned | running | blocked | failed | merged | restored | purged
+        quarantine_path TEXT,                       -- where the rest of the drop tree went
+        error           TEXT,
+        created_at      REAL NOT NULL,
+        finished_at     REAL
+    );
+    CREATE TABLE IF NOT EXISTS merge_items (
+        id           INTEGER PRIMARY KEY,
+        merge_id     INTEGER NOT NULL REFERENCES merges(id),
+        file_id      INTEGER NOT NULL REFERENCES files(id),
+        action       TEXT NOT NULL,                 -- move | conflict | covered
+        src_path     TEXT NOT NULL,                 -- in the drop tree
+        dest_path    TEXT,                          -- in the kept tree (move, conflict)
+        size         INTEGER NOT NULL,
+        mtime_ns     INTEGER NOT NULL,
+        content_hash BLOB,
+        status       TEXT NOT NULL                  -- pending | moving | moved
+    );
+    CREATE INDEX IF NOT EXISTS merge_items_merge ON merge_items(merge_id, status);
     """,
 }
 

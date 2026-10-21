@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
-import { api, type TreeChild, type TreeComparison, type TreePair, type TreeSide } from "../../api";
+import { api, type MergeInfo, type TreeChild, type TreeComparison, type TreePair, type TreeSide } from "../../api";
 import { ago, bytes, count, navigate, useInterval, useLoad } from "../../util";
 import { Empty } from "../Bits";
+import { MergeDialog, MergesPanel } from "./Merges";
+import { ActionError } from "./shared";
 
 const SORTS: [string, string][] = [
   ["shared", "Most data in common"],
@@ -29,6 +31,14 @@ export function FoldersTab() {
     });
   };
 
+  const vols = useLoad(() => api.volumes(), []);
+  const readOnly = new Set((vols.data ?? []).filter((v) => v.read_only).map((v) => v.id));
+  const [prepared, setPrepared] = useState<MergeInfo | null>(null);
+  const [error, setError] = useState<Error | null>(null);
+  const [merged, setMerged] = useState(0);
+  const merge = (keep: { volume: string; root: string }, drop: { volume: string; root: string }) =>
+    api.prepareMerge(keep, drop).then((m) => { setError(null); setPrepared(m); }).catch(setError);
+
   const data = listing.data;
   const items = [...(data?.items ?? []), ...more];
   return (
@@ -47,20 +57,37 @@ export function FoldersTab() {
             data?.built_at ? `${count(data.total)} pairs · compared ${ago(data.built_at)}` : "Comparing folders…"}
         </span>
       </div>
-      {data?.error && <div className="note note-bad">Comparing folders failed: {data.error}</div>}
+      {data?.error && <div className="note note-error">Comparing folders failed: {data.error}</div>}
+      <ActionError error={error} />
+      <MergesPanel refresh={merged} />
       {data?.ready && data.total === 0 && <Empty>No folder trees hold the same files.</Empty>}
       <div className="pairs">
-        {items.map((p) => <PairCard key={`${p.a_volume}/${p.a_root}|${p.b_volume}/${p.b_root}`} pair={p} />)}
+        {items.map((p) => (
+          <PairCard key={`${p.a_volume}/${p.a_root}|${p.b_volume}/${p.b_root}`} pair={p} onMerge={merge}
+            readOnly={readOnly.has(p.a_volume) || readOnly.has(p.b_volume)} />
+        ))}
       </div>
       {data && items.length < data.total && (
         <button className="btn" onClick={loadMore}>Show more ({count(data.total - items.length)} left)</button>
+      )}
+      {prepared && (
+        <MergeDialog prepared={prepared} fresh onClose={() => { setPrepared(null); setMerged((n) => n + 1); }} />
       )}
     </div>
   );
 }
 
-function PairCard({ pair }: { pair: TreePair }) {
+type Place = { volume: string; root: string };
+
+function PairCard({ pair, readOnly, onMerge }: {
+  pair: TreePair; readOnly: boolean; onMerge: (keep: Place, drop: Place) => void;
+}) {
   const [open, setOpen] = useState(false);
+  const left = { volume: pair.a_volume, root: pair.a_root };
+  const right = { volume: pair.b_volume, root: pair.b_root };
+  const why = readOnly ? "The drive is registered read-only: nothing on it can be moved."
+    : pair.a_volume !== pair.b_volume ? "Merging trees on different drives is not available yet."
+      : undefined;
   return (
     <div className="pair tree-pair">
       <div className="pair-stat">
@@ -73,9 +100,15 @@ function PairCard({ pair }: { pair: TreePair }) {
       <Side label={pair.b_label} volume={pair.b_volume} root={pair.b_root} side={pair.b} />
       <div className="pair-actions tree-facts">
         <Facts c={pair} />
-        <button className="btn btn-small" onClick={() => setOpen(!open)}>
-          {open ? "Hide sub-folders" : "Compare sub-folders"}
-        </button>
+        <span className="row">
+          <button className="btn btn-small" onClick={() => setOpen(!open)}>
+            {open ? "Hide sub-folders" : "Compare sub-folders"}
+          </button>
+          <button className="btn btn-small" disabled={!!why || !pair.b_root} title={why}
+            onClick={() => onMerge(left, right)}>Merge right into left…</button>
+          <button className="btn btn-small" disabled={!!why || !pair.a_root} title={why}
+            onClick={() => onMerge(right, left)}>Merge left into right…</button>
+        </span>
       </div>
       {open && <Children pair={pair} />}
     </div>

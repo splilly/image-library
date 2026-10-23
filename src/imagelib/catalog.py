@@ -25,7 +25,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -363,6 +363,30 @@ _MIGRATIONS = {
     13: """
     -- Merges across drives copy files: the record of the copy, removed again by Undo.
     ALTER TABLE merge_items ADD COLUMN dest_file_id INTEGER REFERENCES files(id);
+    """,
+    14: """
+    -- Organize can move pictures into the library instead of copying them, after a preview.
+    ALTER TABLE exports ADD COLUMN mode TEXT NOT NULL DEFAULT 'copy';       -- copy | move
+    ALTER TABLE exports ADD COLUMN state TEXT NOT NULL DEFAULT 'started';   -- planned | started | undone
+    ALTER TABLE exports ADD COLUMN target_volume TEXT;                      -- move: the library's drive
+    ALTER TABLE exports ADD COLUMN target_rel TEXT;                         -- move: the library below its root
+    -- copy | rename (already on the library's drive) | transfer (copy, then quarantine the original)
+    -- | wait (only on read-only drives)
+    ALTER TABLE export_items ADD COLUMN method TEXT NOT NULL DEFAULT 'copy';
+    ALTER TABLE export_items ADD COLUMN source_file_id INTEGER REFERENCES files(id);
+    ALTER TABLE export_items ADD COLUMN dest_file_id INTEGER REFERENCES files(id);  -- transfer: the new copy
+    ALTER TABLE export_items ADD COLUMN quarantine_path TEXT;                       -- transfer: the original
+    ALTER TABLE export_items ADD COLUMN source_path TEXT;                           -- rename: where it was
+    -- Move: the other exact copies of an organized picture, quarantined once it is in the library.
+    CREATE TABLE IF NOT EXISTS export_extras (
+        id              INTEGER PRIMARY KEY,
+        export_id       INTEGER NOT NULL REFERENCES exports(id),
+        content_hash    BLOB NOT NULL,
+        file_id         INTEGER NOT NULL REFERENCES files(id),
+        status          TEXT NOT NULL,              -- pending | quarantined | restored | purged
+        quarantine_path TEXT
+    );
+    CREATE INDEX IF NOT EXISTS export_extras_export ON export_extras(export_id, status);
     """,
 }
 

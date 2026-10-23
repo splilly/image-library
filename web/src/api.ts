@@ -171,15 +171,62 @@ export interface ExportProgress {
   current: string;
   message: string;
   waiting_volumes: string[];
+  extras: number; // other copies quarantined (move)
   running: boolean;
+}
+
+export interface ExportOptions {
+  include_videos: boolean;
+  include_raw: boolean;
+  include_damaged: boolean;
+  mode: "copy" | "move";
 }
 
 export interface ExportInfo {
   id: number;
   target: string;
-  options: { include_videos: boolean; include_raw: boolean; include_damaged: boolean };
+  options: ExportOptions;
   created_at: number;
+  mode: "copy" | "move";
+  state: "planned" | "started" | "undone";
   counts: Counts;
+  extras: Record<string, number>; // other copies to quarantine (move), by status
+}
+
+/** How a picture gets into the library: copied, renamed on the same drive, transferred
+ * (copied, original quarantined) or waiting (only on read-only drives). */
+export type ExportMethod = "copy" | "rename" | "transfer" | "wait";
+
+export interface ExportSummary extends ExportInfo {
+  drives: { volume_id: string | null; label: string; online: boolean; extras?: number;
+    methods: Partial<Record<ExportMethod, { files: number; bytes: number }>> }[];
+  needed_bytes: number; // room needed on the library's drive
+  free_bytes: number | null;
+  target_label: string | null;
+}
+
+export interface ExportFile {
+  dest: string;
+  name: string;
+  hash: string;
+  size: number;
+  method: ExportMethod;
+  status: string;
+  error: string | null;
+  source_label: string | null;
+  source_path: string | null;
+  has_preview: boolean;
+  width: number | null;
+  height: number | null;
+  taken_at: string | null;
+  kind: string | null;
+}
+
+export interface ExportFolder {
+  folder: string;
+  folders: { name: string; path: string; files: number; bytes: number }[];
+  files: ExportFile[];
+  total_files: number;
 }
 
 export interface ScanState {
@@ -191,6 +238,7 @@ export interface ScanState {
   relate?: RelateState;
   plan?: PlanProgress | null;
   export?: ExportProgress | null;
+  merge?: MergeProgress | null;
 }
 
 export interface FileItem {
@@ -680,7 +728,13 @@ export const api = {
     form.append("file", file);
     return request<{ files: number; contents: number; previews: number }>("POST", "/api/remote/bundle/import", form);
   },
-  createExport: (target: string, opts: { include_videos: boolean; include_raw: boolean; include_damaged: boolean }) =>
+  exportSummary: (id: number) => request<ExportSummary>("GET", `/api/organize/${id}`),
+  exportBrowse: (id: number, folder: string, offset = 0) =>
+    request<ExportFolder>("GET", `/api/organize/${id}/browse${qs({ folder, offset })}`),
+  discardExport: (id: number) => request<{ discarded: number }>("DELETE", `/api/organize/${id}`),
+  undoExport: (id: number) => request<{ problems: string[] }>("POST", `/api/organize/${id}/undo`),
+  purgeExport: (id: number) => request<{ bytes: number; waiting: string[] }>("POST", `/api/organize/${id}/purge`),
+  createExport: (target: string, opts: ExportOptions) =>
     request<{ id: number; items: number; bytes: number }>("POST", "/api/organize", { target, ...opts }),
   exports: () => request<ExportInfo[]>("GET", "/api/organize"),
   runExport: (id: number) => request<ExportProgress>("POST", `/api/organize/${id}/run`),

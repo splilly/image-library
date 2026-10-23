@@ -78,7 +78,7 @@ export default function App() {
         ) : route.page === "drives" ? (
           <Drives scan={scan} />
         ) : route.page === "organize" ? (
-          <Organize scan={scan} />
+          <Organize scan={scan} params={route.params} />
         ) : route.page === "settings" ? (
           <Settings auth={auth} />
         ) : route.page === "find" ? (

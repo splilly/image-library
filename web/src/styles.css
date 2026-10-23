@@ -401,3 +401,18 @@ kbd { font: 11px ui-monospace, Menlo, monospace; border: 1px solid var(--border)
 .scan-bottleneck { margin-top: 6px; color: var(--muted); }
 .storage-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
 .storage-low { border-color: var(--warn); }
+
+/* Organize: preview of a planned library */
+button.link { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; font: inherit; }
+.crumbs { margin: 12px 0 8px; }
+.organize-modes { display: grid; gap: 8px; margin: 10px 0; }
+.organize-modes .check { align-items: flex-start; }
+.organize-folders { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; margin-bottom: 12px; }
+.organize-folder { display: grid; gap: 2px; text-align: left; border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; background: var(--surface); cursor: pointer; }
+.organize-folder:hover { border-color: var(--accent); }
+.organize-grid { padding: 0; }
+.organize-totals .tiles { margin-bottom: 8px; }
+.organize-detail { margin-top: 12px; display: grid; gap: 4px; }
+.method-tag { position: absolute; bottom: 6px; right: 6px; font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 8px; background: var(--surface); color: var(--muted); }
+.method-transfer { color: var(--accent); }
+.method-wait { color: var(--warn); }

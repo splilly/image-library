@@ -25,7 +25,7 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from . import analyze, discover, formats, merges, organize, plans, queries, remote, review, sync, trees, volumes
 from .catalog import Catalog
@@ -186,6 +186,7 @@ class OrganizeRequest(BaseModel):
     include_videos: bool = True
     include_raw: bool = True
     include_damaged: bool = False
+    mode: str = Field("copy", pattern="^(copy|move)$")
 
 
 class HashList(BaseModel):
@@ -765,11 +766,55 @@ def create_app(catalog_dir: Path, workers: int | None = None, auto_relate: bool 
         target = Path(req.target)
         if not target.is_absolute():
             raise HTTPException(400, "choose a folder")
-        found = volumes.resolve_path(c, target if target.exists() else target.parent, adopt=False)
+        probe = next((p for p in [target, *target.parents] if p.exists()), target)
+        found = volumes.resolve_path(c, probe, adopt=False)
         if found and found[0].read_only:
             raise HTTPException(400, f"'{found[0].label}' is registered read-only; choose another drive")
-        opts = organize.Options(req.include_videos, req.include_raw, req.include_damaged)
-        return organize.create(c, target, opts)
+        opts = organize.Options(req.include_videos, req.include_raw, req.include_damaged, req.mode)
+        target_volume = target_rel = None
+        if found:
+            target_volume = found[0].id
+            rel = target.resolve().relative_to(found[1].resolve()).as_posix()
+            target_rel = "" if rel == "." else rel
+        try:
+            return organize.create(c, target, opts, target_volume, target_rel)
+        except organize.Refused as e:
+            raise HTTPException(400, str(e))
+
+    @app.get("/api/organize/{export_id}")
+    def organize_summary(export_id: int):
+        try:
+            return organize.summary(cat(), export_id, online.get())
+        except KeyError:
+            raise HTTPException(404, "no such library")
+
+    @app.get("/api/organize/{export_id}/browse")
+    def organize_browse(export_id: int, folder: str = "", offset: int = 0, limit: int = Query(200, le=1000)):
+        return organize.browse(cat(), export_id, folder, offset, limit)
+
+    def organize_action(export_id: int, action) -> dict:
+        if exporter.running:
+            raise HTTPException(409, "the library is being organized right now; pause it first")
+        try:
+            return action(cat(), export_id, online.get(force=True))
+        except organize.Refused as e:
+            raise HTTPException(409, str(e))
+
+    @app.post("/api/organize/{export_id}/undo")
+    def organize_undo(export_id: int):
+        return organize_action(export_id, organize.undo)
+
+    @app.post("/api/organize/{export_id}/purge")
+    def organize_purge(export_id: int):
+        return organize_action(export_id, organize.purge)
+
+    @app.delete("/api/organize/{export_id}")
+    def organize_discard(export_id: int):
+        try:
+            organize.discard(cat(), export_id)
+        except organize.Refused as e:
+            raise HTTPException(409, str(e))
+        return {"discarded": export_id}
 
     @app.get("/api/organize")
     def organize_list():

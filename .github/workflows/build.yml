@@ -1,0 +1,65 @@
+# Self-contained builds for Windows, macOS and Linux.
+# Runs for pull requests, on demand (Actions tab) and for version tags; a tag also
+# publishes a release.
+name: build
+
+on:
+  pull_request:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --frozen
+      - run: uv run pytest -q
+
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        # macos-latest is Apple Silicon. Add an Intel macOS runner here if one is still offered.
+        os: [windows-latest, macos-latest, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --frozen
+      - run: uv run python packaging/build.py --with-cloudflared
+      - name: Smoke test the packaged app
+        shell: bash
+        run: |
+          exe=dist/imagelib/imagelib
+          [ -f "$exe.exe" ] && exe="$exe.exe"
+          uv run python packaging/smoke_test.py "$exe"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: imagelib-${{ matrix.os }}
+          path: dist/*.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: "*.zip"
